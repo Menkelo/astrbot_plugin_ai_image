@@ -1,6 +1,6 @@
 """
-Gemini Image Generation Module
-封装 Gemini/OpenAI/Vertex API 的图像生成功能（单提供商，失败重试）
+AI Image Generation Module
+封装 Gemini/OpenAI/Vertex AI 多 API 图像生成功能（单提供商，失败重试）
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ class ProviderConfig:
     vertex_keys: list[str] | None = None
 
 
-class GeminiImageGenerator:
-    """图像生成器（单提供商）"""
+class AIImageGenerator:
+    """AI 图像生成器（支持 Gemini/OpenAI/Vertex）"""
 
     def __init__(
         self,

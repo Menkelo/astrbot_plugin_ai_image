@@ -18,7 +18,7 @@ from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.utils.io import download_image_by_url, save_temp_img
 
-from .gemini_generator import GeminiImageGenerator, ProviderConfig
+from .image_generator import AIImageGenerator, ProviderConfig
 
 
 @dataclass
@@ -977,7 +977,7 @@ class Gemini_Images(Star):
 
         final_ar = aspect_ratio if aspect_ratio != "自动" else None
 
-        generator = GeminiImageGenerator(
+        generator = AIImageGenerator(
             main_config=provider,
             timeout=self.timeout,
         )
