@@ -1,6 +1,14 @@
 # AI 绘图聚合插件
 
-### 命令
+多模型 AI 图像生成插件，支持 Gemini/OpenAI/Vertex AI 三种 API 类型，提供灵活的 3 槽位命令绑定，支持文生图、图生图及智能参考图识别。
+
+## 快速开始
+
+1. 在 AstrBot 插件市场搜索「AI 绘图聚合」并安装
+2. 配置页面选择提供商（或手动配置 API）
+3. 发送 `/生图 一只可爱的猫咪` 开始使用
+
+## 命令
 - `/生图 <提示词或预设名称> [额外提示词]` (可配置为其他命令)
   - 生成图片。示例: `/生图 一只可爱的小猫`
   - 使用预设。示例: `/生图 手办化`
@@ -168,3 +176,30 @@
 > 支持的分辨率（仅 Vertex 渠道）：`1K`、`2K`、`4K`
 
 **💡 预设联动**：可对接全局预设 [astrbot_plugin_preset_hub](https://github.com/Menkelo/astrbot_plugin_preset_hub)，统一管理预设库。
+
+## 常见问题
+
+### Q: 支持哪些 AI 模型？
+A: 支持所有兼容 Gemini/OpenAI/Vertex AI 接口的模型，插件会自动识别 API 类型。
+
+### Q: 如何配置多个模型？
+A: 使用 3 个提供商槽位分别绑定不同模型，或启用 Vertex 手动配置使用双模型。
+
+### Q: 生成失败怎么办？
+A: 插件内置 3 次自动重试，失败后会显示简化的错误信息。检查 API Key 是否有效，配额是否充足。
+
+### Q: 白名单用户有什么特权？
+A: 白名单用户不受每日免费次数限制，在 Vertex 渠道可使用 4K 分辨率（普通用户限制 1K）。
+
+### Q: 如何获取用户头像作为参考图？
+A: 在命令中 @ 用户即可，如：`/生图 手办化 @用户A`
+
+## 贡献与支持
+
+- 项目地址：[GitHub](https://github.com/Menkelo/astrbot_plugin_ai_image)
+- 问题反馈：[Issues](https://github.com/Menkelo/astrbot_plugin_ai_image/issues)
+- 许可协议：AGPL-3.0
+
+## 致谢
+
+感谢 AstrBot 框架提供的强大插件系统支持。

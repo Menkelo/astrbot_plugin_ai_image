@@ -19,11 +19,13 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
 # Virtual Environment
 venv/
 ENV/
 env/
+.venv
 
 # IDE
 .vscode/
@@ -31,11 +33,23 @@ env/
 *.swp
 *.swo
 *~
+.DS_Store
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Plugin specific
 daily_quota_usage.json
 *.log
+
+# Test
+test/
+tests/
+*.test.py
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
