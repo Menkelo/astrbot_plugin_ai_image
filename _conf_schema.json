@@ -195,7 +195,7 @@
         "description": "用户列表",
         "type": "list",
         "default": [],
-        "hint": "填入用户ID (QQ号等)"
+        "hint": "填入用户ID (QQ号等)。白名单模式下，机器人管理员自动视为白名单，无需手动填入。"
       },
       "groups": {
         "description": "群组列表",

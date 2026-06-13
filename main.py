@@ -343,10 +343,31 @@ class Gemini_Images(Star):
     # Permission / Quota
     # =========================
 
-    def _check_permission(self, user_id: str, group_id: str = "") -> bool:
+    def _is_event_admin(self, event: AstrMessageEvent) -> bool:
+        """判断消息发送者是否为 AstrBot 机器人管理员。
+
+        机器人管理员（在 AstrBot 全局配置中设置）自动等同白名单用户，
+        无需在本插件的 permission_config.users 中手动添加其 QQ。
+        优先使用 event.is_admin()，回退到 event.role 以兼容旧版本。
+        """
+        try:
+            is_admin_fn = getattr(event, "is_admin", None)
+            if callable(is_admin_fn):
+                return bool(is_admin_fn())
+            return getattr(event, "role", "member") == "admin"
+        except Exception:
+            return False
+
+    def _check_permission(
+        self, user_id: str, group_id: str = "", is_admin: bool = False
+    ) -> bool:
         mode = (self.perm_mode or "disable").strip()
 
         if mode == "disable":
+            return True
+
+        # 机器人管理员始终拥有权限
+        if is_admin:
             return True
 
         user_id = str(user_id).strip()
@@ -371,7 +392,13 @@ class Gemini_Images(Star):
 
         return True
 
-    def _is_quota_exempt(self, user_id: str, group_id: str = "") -> bool:
+    def _is_quota_exempt(
+        self, user_id: str, group_id: str = "", is_admin: bool = False
+    ) -> bool:
+        # 机器人管理员免每日次数限制
+        if is_admin:
+            return True
+
         uid = str(user_id).strip()
         gid = str(group_id).strip()
 
@@ -417,9 +444,9 @@ class Gemini_Images(Star):
             logger.warning(f"保存每日次数文件失败: {e}")
 
     async def _check_and_consume_quota(
-        self, user_id: str, group_id: str = ""
+        self, user_id: str, group_id: str = "", is_admin: bool = False
     ) -> tuple[bool, int]:
-        if self._is_quota_exempt(user_id, group_id):
+        if self._is_quota_exempt(user_id, group_id, is_admin):
             return True, -1
 
         if not self.enable_daily_quota:
@@ -539,10 +566,11 @@ class Gemini_Images(Star):
         group_id: str,
         requested: str | None,
         slot_default: str,
+        is_admin: bool = False,
     ) -> str:
         """
         仅 Vertex 渠道使用。
-        白名单用户可指定 1K/2K/4K；
+        白名单用户及机器人管理员可指定 1K/2K/4K；
         非白名单用户无论群组状态，全部强制 1K。
         """
         uid = str(user_id).strip()
@@ -552,7 +580,7 @@ class Gemini_Images(Star):
         if req not in {"1K", "2K", "4K"}:
             req = "1K"
 
-        if uid in users:
+        if is_admin or uid in users:
             return req
 
         return "1K"
@@ -638,17 +666,20 @@ class Gemini_Images(Star):
         user_id = str(event.get_sender_id() or event.unified_msg_origin)
         group_id = event.message_obj.group_id or ""
 
+        # 机器人管理员自动等同白名单用户（权限/免次数/高分辨率）
+        is_admin = self._is_event_admin(event)
+
         mode = (self.perm_mode or "disable").strip()
 
         if mode == "blacklist":
-            if not self._check_permission(user_id, group_id):
+            if not self._check_permission(user_id, group_id, is_admin):
                 if not self.perm_silent:
                     yield event.plain_result(self.perm_no_permission_reply)
                 return
         elif mode == "whitelist":
             pass
         else:
-            if not self._check_permission(user_id, group_id):
+            if not self._check_permission(user_id, group_id, is_admin):
                 if not self.perm_silent:
                     yield event.plain_result(self.perm_no_permission_reply)
                 return
@@ -658,7 +689,7 @@ class Gemini_Images(Star):
             yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
             return
 
-        ok, remain = await self._check_and_consume_quota(user_id, group_id)
+        ok, remain = await self._check_and_consume_quota(user_id, group_id, is_admin)
         if not ok:
             yield event.plain_result(self.quota_exceeded_reply)
             return
@@ -754,6 +785,7 @@ class Gemini_Images(Star):
                 group_id=group_id,
                 requested=requested_res,
                 slot_default=slot.default_resolution,
+                is_admin=is_admin,
             )
         else:
             final_resolution = self._normalize_config_resolution(slot.default_resolution)
