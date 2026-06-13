@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from collections.abc import Coroutine
 from typing import Any, Tuple, Optional, List
 
+import aiohttp
+
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.utils.io import download_image_by_url, save_temp_img
 
@@ -33,6 +35,10 @@ class SlotConfig:
 class Gemini_Images(Star):
     """AI 图像生成插件（3提供商槽位 + Vertex 手动双指令双模型）"""
 
+    # 静态命令集合（与下方 @filter.command 装饰器一一对应），
+    # 用于动态命令入口去重，提为类常量避免每条消息都重建。
+    _STATIC_COMMANDS = frozenset({"生图", "gpt", "flow", "vertex图", "vertex图2"})
+
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.context = context
@@ -41,8 +47,14 @@ class Gemini_Images(Star):
         self._load_config()
         self.background_tasks: set[asyncio.Task] = set()
 
+        # 复用同一个 aiohttp 会话，避免每次生图都重新握手
+        self._http_session: aiohttp.ClientSession | None = None
+
+        # Vertex 多 Key 跨请求轮换游标（每个 vertex 请求自增，实现负载分流）
+        self._vertex_key_cursor = 0
+
         self._quota_lock = asyncio.Lock()
-        self._quota_file = Path(__file__).resolve().parent / "daily_quota_usage.json"
+        self._quota_file = self._resolve_quota_file()
         self._quota_data = self._load_quota_data()
 
         for s in self.slots:
@@ -61,9 +73,31 @@ class Gemini_Images(Star):
             for task in list(self.background_tasks):
                 if not task.done():
                     task.cancel()
+            if self._http_session and not self._http_session.closed:
+                await self._http_session.close()
             logger.info("插件已卸载")
         except Exception as e:
             logger.error(f"卸载清理出错: {e}")
+
+    def _get_http_session(self) -> aiohttp.ClientSession:
+        """获取共享的 aiohttp 会话（懒加载），由插件统一在 terminate 时关闭。"""
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
+
+    def _resolve_quota_file(self) -> Path:
+        """每日次数文件路径。
+
+        优先使用 AstrBot 持久化数据目录（data/plugin_data/...），
+        避免插件更新/重装时连同目录被覆盖导致次数记录丢失；
+        获取失败时回退到插件目录内的旧路径以保持兼容。
+        """
+        try:
+            data_dir = StarTools.get_data_dir("astrbot_plugin_ai_image")
+            return Path(data_dir) / "daily_quota_usage.json"
+        except Exception as e:
+            logger.warning(f"获取插件数据目录失败，回退到插件目录: {e}")
+            return Path(__file__).resolve().parent / "daily_quota_usage.json"
 
     # =========================
     # Config
@@ -103,6 +137,8 @@ class Gemini_Images(Star):
 
         self.timeout = int(gen_config.get("timeout", 180))
         self.max_image_size_mb = int(gen_config.get("max_image_size_mb", 10))
+        self.max_retries = max(1, int(gen_config.get("max_retries", 3)))
+        self.retry_interval = max(0, int(gen_config.get("retry_interval", 1)))
 
         self.perm_mode = perm_conf.get("mode", "disable")
         self.perm_users = set(perm_conf.get("users", []))
@@ -383,13 +419,9 @@ class Gemini_Images(Star):
                 return False
             return True
 
-        if mode == "whitelist":
-            if user_id in limit_users:
-                return True
-            if group_id and group_id in limit_groups:
-                return True
-            return False
-
+        # whitelist 模式不在此处拦截：本插件的白名单语义是 VIP 特权
+        # （免每日次数 + Vertex 高分辨率），由 _is_quota_exempt /
+        # _resolve_resolution_by_acl 处理，生图本身对所有人开放。
         return True
 
     def _is_quota_exempt(
@@ -437,9 +469,17 @@ class Gemini_Images(Star):
         }
 
     def _save_quota_data(self):
+        """原子写入每日次数文件。
+
+        先写临时文件再 os.replace，避免写入中途被中断导致文件损坏、
+        下次加载失败而清空所有用户的当日计数。
+        调用方需自行通过 asyncio.to_thread 在事件循环外执行，避免阻塞。
+        """
         try:
-            with open(self._quota_file, "w", encoding="utf-8") as f:
+            tmp_file = self._quota_file.with_name(self._quota_file.name + ".tmp")
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(self._quota_data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, self._quota_file)
         except Exception as e:
             logger.warning(f"保存每日次数文件失败: {e}")
 
@@ -474,10 +514,27 @@ class Gemini_Images(Star):
 
             used += 1
             users[uid] = used
-            self._save_quota_data()
+            await asyncio.to_thread(self._save_quota_data)
 
             remain = self.daily_free_count - used
             return True, remain
+
+    async def _refund_quota(self, user_id: str):
+        """退还一次已扣除的每日次数（用于生成失败/未产出图片时）。"""
+        uid = str(user_id).strip()
+        if not uid:
+            return
+
+        async with self._quota_lock:
+            # 跨天后旧计数已重置，无需退还
+            if self._quota_data.get("date") != self._today_str():
+                return
+
+            users = self._quota_data.setdefault("users", {})
+            used = int(users.get(uid, 0))
+            if used > 0:
+                users[uid] = used - 1
+                await asyncio.to_thread(self._save_quota_data)
 
     # =========================
     # Text Parsing
@@ -632,8 +689,7 @@ class Gemini_Images(Star):
 
         first = user_input.split(maxsplit=1)[0].lstrip("/")
 
-        static_commands = {"生图", "gpt", "flow", "vertex图", "vertex图2"}
-        if first in static_commands:
+        if first in self._STATIC_COMMANDS:
             return
 
         slot = self.command_map.get(first)
@@ -693,6 +749,9 @@ class Gemini_Images(Star):
         if not ok:
             yield event.plain_result(self.quota_exceeded_reply)
             return
+
+        # remain >= 0 表示本次确实扣除了次数（豁免/不限次时为 -1）
+        quota_consumed = remain >= 0
 
         masked_uid = user_id[:4] + "****" + user_id[-4:] if len(user_id) > 8 else user_id
         user_input = (event.message_str or "").strip()
@@ -846,6 +905,8 @@ class Gemini_Images(Star):
                 resolution=final_resolution,
                 task_id=task_id,
                 reply_id=reply_id,
+                user_id=user_id,
+                quota_consumed=quota_consumed,
             )
         )
 
@@ -1003,16 +1064,31 @@ class Gemini_Images(Star):
         resolution: str = "1K",
         task_id: str | None = None,
         reply_id: str | None = None,
+        user_id: str = "",
+        quota_consumed: bool = False,
     ):
         if not task_id:
             task_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
 
         final_ar = aspect_ratio if aspect_ratio != "自动" else None
 
+        # Vertex 多 Key 跨请求轮换：取当前游标作为本次起始 Key，再自增。
+        # 非 Vertex 渠道不受影响（起始索引 0）。
+        vertex_start = 0
+        if provider.api_type == "vertex":
+            vertex_start = self._vertex_key_cursor
+            self._vertex_key_cursor += 1
+
         generator = AIImageGenerator(
             main_config=provider,
             timeout=self.timeout,
+            session=self._get_http_session(),
+            max_retries=self.max_retries,
+            retry_delay=self.retry_interval,
+            vertex_start_idx=vertex_start,
         )
+
+        success = False
 
         try:
             results, error = await generator.generate_image(
@@ -1030,6 +1106,8 @@ class Gemini_Images(Star):
             if not results:
                 return
 
+            # 已成功产出图片，本次次数消耗有效，不再退还
+            success = True
             logger.info(f"任务完成 [{task_id}] - 生成了 {len(results)} 张图片")
 
             components = []
@@ -1039,7 +1117,7 @@ class Gemini_Images(Star):
 
             for img_bytes in results:
                 try:
-                    file_path = save_temp_img(img_bytes)
+                    file_path = await asyncio.to_thread(save_temp_img, img_bytes)
                     components.append(Comp.Image.fromFileSystem(file_path))
                 except Exception as e:
                     logger.error(f"保存图片失败: {e}")
@@ -1050,4 +1128,8 @@ class Gemini_Images(Star):
             logger.error(f"任务失败: {e}", exc_info=True)
             await self._reply_error(event, "❌ 生成过程中发生未知错误")
         finally:
+            # 共享会话由插件统一管理，这里只关闭生成器自建的会话（若有）
             await generator.close_session()
+            # 生成失败/未产出图片时退还已扣除的免费次数
+            if quota_consumed and not success:
+                await self._refund_quota(user_id)

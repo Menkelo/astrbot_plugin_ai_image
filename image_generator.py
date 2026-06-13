@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import re
+import traceback
 from io import BytesIO
 from dataclasses import dataclass
 
@@ -34,23 +35,54 @@ class ProviderConfig:
 class AIImageGenerator:
     """AI 图像生成器（支持 Gemini/OpenAI/Vertex）"""
 
+    # 统一的宽高比映射表，供尺寸计算 / 比例推断复用
+    RATIO_WH: dict[str, tuple[int, int]] = {
+        "1:1": (1, 1),
+        "16:9": (16, 9),
+        "9:16": (9, 16),
+        "4:3": (4, 3),
+        "3:4": (3, 4),
+        "3:2": (3, 2),
+        "2:3": (2, 3),
+        "4:5": (4, 5),
+        "5:4": (5, 4),
+        "21:9": (21, 9),
+        "9:21": (9, 21),
+    }
+
+    # 这些 HTTP 状态码属于请求本身的问题（参数/鉴权/内容策略等），
+    # 重试同样的请求不会成功，遇到时直接停止重试以节省超时等待。
+    NON_RETRYABLE_CODES: frozenset[str] = frozenset(
+        {"400", "401", "403", "404", "413", "415", "422"}
+    )
+
     def __init__(
         self,
         main_config: ProviderConfig | None,
         timeout: int = 120,
+        session: aiohttp.ClientSession | None = None,
+        max_retries: int = 3,
+        retry_delay: float = 1,
+        vertex_start_idx: int = 0,
     ):
         self.main_config = main_config
         self.timeout = timeout
-        self._session: aiohttp.ClientSession | None = None
-        self._vertex_idx = 0
+        self._session = session
+        # 仅当会话由本实例创建时才负责关闭；注入的共享会话不在此关闭
+        self._owns_session = session is None
+        self.max_retries = max(1, int(max_retries))
+        self.retry_delay = max(0, float(retry_delay))
+        # 由调用方传入起始 Key 索引，实现 Vertex 多 Key 跨请求轮换
+        self._vertex_idx = max(0, int(vertex_start_idx))
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
+            self._owns_session = True
         return self._session
 
     async def close_session(self):
-        if self._session and not self._session.closed:
+        if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
             self._session = None
 
@@ -503,21 +535,7 @@ class AIImageGenerator:
         if not ratio:
             return None
 
-        ratio = ratio.strip()
-        ratio_map = {
-            "1:1": (1, 1),
-            "16:9": (16, 9),
-            "9:16": (9, 16),
-            "4:3": (4, 3),
-            "3:4": (3, 4),
-            "3:2": (3, 2),
-            "2:3": (2, 3),
-            "4:5": (4, 5),
-            "5:4": (5, 4),
-            "21:9": (21, 9),
-            "9:21": (9, 21),
-        }
-        return ratio_map.get(ratio)
+        return self.RATIO_WH.get(ratio.strip())
 
     def _sync_pad_image_to_ratio(
         self,
@@ -677,17 +695,7 @@ class AIImageGenerator:
 
             r = w / h
             candidates = {
-                "1:1": 1 / 1,
-                "16:9": 16 / 9,
-                "9:16": 9 / 16,
-                "4:3": 4 / 3,
-                "3:4": 3 / 4,
-                "3:2": 3 / 2,
-                "2:3": 2 / 3,
-                "4:5": 4 / 5,
-                "5:4": 5 / 4,
-                "21:9": 21 / 9,
-                "9:21": 9 / 21,
+                k: rw / rh for k, (rw, rh) in self.RATIO_WH.items()
             }
 
             best_ratio = None
@@ -712,21 +720,7 @@ class AIImageGenerator:
         base_map = {"1K": 1024, "2K": 1536, "4K": 2048}
         base = base_map.get((image_size or "1K").upper(), 1024)
 
-        ratio_map = {
-            "1:1": (1, 1),
-            "16:9": (16, 9),
-            "9:16": (9, 16),
-            "4:3": (4, 3),
-            "3:4": (3, 4),
-            "3:2": (3, 2),
-            "2:3": (2, 3),
-            "4:5": (4, 5),
-            "5:4": (5, 4),
-            "21:9": (21, 9),
-            "9:21": (9, 21),
-        }
-
-        rw, rh = ratio_map.get((aspect_ratio or "1:1").strip(), (1, 1))
+        rw, rh = self.RATIO_WH.get((aspect_ratio or "1:1").strip(), (1, 1))
 
         if rw == rh:
             w = h = base
@@ -771,6 +765,27 @@ class AIImageGenerator:
     # Main Generate
     # =========================
 
+    def _is_non_retryable(self, error: str | None) -> bool:
+        """根据错误信息判断是否为不可重试的请求级错误（4xx 客户端错误）。"""
+        if not error:
+            return False
+        m = re.search(r"\bAPI\s+(\d{3})\b", str(error))
+        return bool(m and m.group(1) in self.NON_RETRYABLE_CODES)
+
+    @staticmethod
+    def _augment_prompt_for_ratio(
+        prompt: str,
+        aspect_ratio: str | None,
+        images_data: list,
+    ) -> str:
+        """带参考图且指定比例时，给提示词追加比例约束（Gemini/Vertex 共用）。"""
+        if aspect_ratio and images_data:
+            return (
+                f"输出比例必须为 {aspect_ratio}，并填满画面，不要黑边，不要留白。\n"
+                f"{prompt}"
+            )
+        return prompt
+
     async def generate_image(
         self,
         prompt: str,
@@ -790,7 +805,7 @@ class AIImageGenerator:
                 c_data, c_mime = await self._convert_image_format(img_data, mime_type)
                 converted_images.append((c_data, c_mime))
 
-        retry_queue: list[ProviderConfig] = [self.main_config] * 3
+        retry_queue: list[ProviderConfig] = [self.main_config] * self.max_retries
         last_error_short = "API 请求失败"
 
         for i, provider in enumerate(retry_queue):
@@ -837,14 +852,16 @@ class AIImageGenerator:
                 last_error_short = self._short_api_error(error)
                 logger.warning(f"{prefix}生成失败: {last_error_short}")
 
-            except Exception as e:
-                import traceback
+                if self._is_non_retryable(error):
+                    logger.info(f"{prefix}错误不可重试（{last_error_short}），停止重试")
+                    return None, last_error_short
 
+            except Exception as e:
                 logger.error(f"{prefix}异常: {e}\n{traceback.format_exc()}")
                 last_error_short = self._short_api_error(str(e))
 
             if i < len(retry_queue) - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(self.retry_delay)
 
         return None, last_error_short
 
@@ -1128,12 +1145,9 @@ class AIImageGenerator:
                 "x-goog-api-key": config.api_key,
             }
 
-            final_prompt = prompt
-            if aspect_ratio and images_data:
-                final_prompt = (
-                    f"输出比例必须为 {aspect_ratio}，并填满画面，不要黑边，不要留白。\n"
-                    f"{prompt}"
-                )
+            final_prompt = self._augment_prompt_for_ratio(
+                prompt, aspect_ratio, images_data
+            )
 
             payload = self._build_gemini_payload(
                 final_prompt,
@@ -1187,12 +1201,9 @@ class AIImageGenerator:
             loc = (config.location or "us-central1").strip()
             model = (config.model or "").strip()
 
-            final_prompt = prompt
-            if aspect_ratio and images_data:
-                final_prompt = (
-                    f"输出比例必须为 {aspect_ratio}，并填满画面，不要黑边，不要留白。\n"
-                    f"{prompt}"
-                )
+            final_prompt = self._augment_prompt_for_ratio(
+                prompt, aspect_ratio, images_data
+            )
 
             payload = self._build_gemini_payload(
                 final_prompt,

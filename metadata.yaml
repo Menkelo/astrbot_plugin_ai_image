@@ -1,6 +1,6 @@
 name: astrbot_plugin_ai_image
 display_name: Ai绘图聚合
 desc: "[aiocqhttp]多模型图像生成插件（3槽位命令绑定）"
-version: 1.4.0
+version: 1.4.1
 author: Menkelo
 repo: https://github.com/Menkelo/astrbot_plugin_ai_image

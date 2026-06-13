@@ -177,6 +177,18 @@
         "hint": "用户上传的参考图片最大允许大小",
         "type": "int",
         "default": 10
+      },
+      "max_retries": {
+        "description": "失败重试次数",
+        "hint": "生成失败时的总尝试次数（含首次），最小为 1",
+        "type": "int",
+        "default": 3
+      },
+      "retry_interval": {
+        "description": "重试间隔（秒）",
+        "hint": "每次重试之间的等待秒数",
+        "type": "int",
+        "default": 1
       }
     }
   },
