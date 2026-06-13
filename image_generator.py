@@ -56,6 +56,20 @@ class AIImageGenerator:
         {"400", "401", "403", "404", "413", "415", "422"}
     )
 
+    # Gemini/Vertex 返回 200 但因内容安全策略未产出图片时的 finishReason，
+    # 属于内容被拦截，重试同样会被拦，故视为不可重试。
+    GEMINI_BLOCK_REASONS: frozenset[str] = frozenset(
+        {
+            "SAFETY",
+            "IMAGE_SAFETY",
+            "PROHIBITED_CONTENT",
+            "IMAGE_PROHIBITED_CONTENT",
+            "BLOCKLIST",
+            "RECITATION",
+            "SPII",
+        }
+    )
+
     def __init__(
         self,
         main_config: ProviderConfig | None,
@@ -90,11 +104,33 @@ class AIImageGenerator:
     # Error / Response Helpers
     # =========================
 
+    # HTTP 状态码 -> 用户可读说明
+    CODE_DESC: dict[str, str] = {
+        "400": "请求参数有误 (400)",
+        "401": "API Key 无效或未授权 (401)",
+        "403": "无访问权限或 Key 被拒 (403)",
+        "404": "接口或模型不存在 (404)",
+        "408": "请求超时 (408)",
+        "409": "请求冲突 (409)",
+        "413": "请求体过大 (413)",
+        "415": "不支持的媒体类型 (415)",
+        "422": "请求无法处理 (422)",
+        "429": "请求过于频繁或配额已用尽 (429)",
+        "500": "服务端内部错误 (500)",
+        "502": "网关错误 (502)",
+        "503": "服务暂不可用 (503)",
+        "504": "网关超时 (504)",
+    }
+
     def _short_api_error(self, error: str | None) -> str:
         """
         将详细错误压缩成用户可读的短错误，避免暴露完整 URL / 响应体。
         """
         err_str = str(error or "")
+
+        # 内容安全拦截类消息已是可读文案，直接透传
+        if "安全策略拦截" in err_str:
+            return err_str
 
         status_match = (
             re.search(r"\bAPI\s+(\d{3})\b", err_str, re.IGNORECASE)
@@ -104,15 +140,12 @@ class AIImageGenerator:
         )
 
         if status_match:
-            return f"API {status_match.group(1)}"
+            code = status_match.group(1)
+            return self.CODE_DESC.get(code, f"API {code}")
 
-        for code in (
-            "400", "401", "403", "404", "408", "409",
-            "413", "415", "422", "429",
-            "500", "502", "503", "504",
-        ):
+        for code, desc in self.CODE_DESC.items():
             if code in err_str:
-                return f"API {code}"
+                return desc
 
         if "API 未返回图片" in err_str or "响应中未找到图片数据" in err_str:
             return "API 未返回图片"
@@ -766,11 +799,40 @@ class AIImageGenerator:
     # =========================
 
     def _is_non_retryable(self, error: str | None) -> bool:
-        """根据错误信息判断是否为不可重试的请求级错误（4xx 客户端错误）。"""
+        """根据错误信息判断是否为不可重试的错误。
+
+        包括 4xx 客户端错误，以及内容被安全策略拦截（重试同样会被拦）。
+        """
         if not error:
             return False
-        m = re.search(r"\bAPI\s+(\d{3})\b", str(error))
+        err = str(error)
+        if "安全策略拦截" in err:
+            return True
+        m = re.search(r"\bAPI\s+(\d{3})\b", err)
         return bool(m and m.group(1) in self.NON_RETRYABLE_CODES)
+
+    def _gemini_block_reason(self, data: object | None) -> str | None:
+        """从 Gemini/Vertex 响应中提取内容安全拦截原因（无则返回 None）。
+
+        命中时说明请求因安全策略被拒，重试无意义，返回可直接展示的文案。
+        """
+        if not isinstance(data, dict):
+            return None
+
+        pf = data.get("promptFeedback")
+        if isinstance(pf, dict) and pf.get("blockReason"):
+            return f"提示词被安全策略拦截（{pf.get('blockReason')}），请调整后再试"
+
+        candidates = data.get("candidates")
+        if isinstance(candidates, list):
+            for cand in candidates:
+                if not isinstance(cand, dict):
+                    continue
+                fr = cand.get("finishReason")
+                if fr and str(fr) in self.GEMINI_BLOCK_REASONS:
+                    return f"图片被安全策略拦截（{fr}），请调整提示词后再试"
+
+        return None
 
     @staticmethod
     def _augment_prompt_for_ratio(
@@ -1174,6 +1236,11 @@ class AIImageGenerator:
                 if parse_error:
                     return None, parse_error
 
+                block_reason = self._gemini_block_reason(data)
+                if block_reason:
+                    logger.warning(f"内容被拦截: {block_reason}")
+                    return None, block_reason
+
                 return self._no_image_error(data)
 
         except asyncio.TimeoutError:
@@ -1235,6 +1302,11 @@ class AIImageGenerator:
 
                 if parse_error:
                     return None, parse_error
+
+                block_reason = self._gemini_block_reason(data)
+                if block_reason:
+                    logger.warning(f"内容被拦截: {block_reason}")
+                    return None, block_reason
 
                 return self._no_image_error(data)
 
