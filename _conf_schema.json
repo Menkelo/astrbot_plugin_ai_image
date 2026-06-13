@@ -1,0 +1,244 @@
+{
+  "api_config": {
+    "description": "提供商配置",
+    "type": "object",
+    "items": {
+      "provider_1": {
+        "description": "提供商1（默认）",
+        "type": "object",
+        "items": {
+          "id": {
+            "description": "提供商ID",
+            "hint": "系统提供商选择",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "command": {
+            "description": "触发命令",
+            "hint": "建议保持默认: 生图",
+            "type": "string",
+            "default": "生图"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      },
+      "provider_2": {
+        "description": "提供商2",
+        "type": "object",
+        "items": {
+          "id": {
+            "description": "提供商ID",
+            "hint": "系统提供商选择",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "command": {
+            "description": "触发命令",
+            "hint": "建议默认: 动漫图",
+            "type": "string",
+            "default": "动漫图"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      },
+      "provider_3": {
+        "description": "提供商3",
+        "type": "object",
+        "items": {
+          "id": {
+            "description": "提供商ID",
+            "hint": "系统提供商选择",
+            "type": "string",
+            "default": "",
+            "_special": "select_provider"
+          },
+          "command": {
+            "description": "触发命令",
+            "hint": "建议默认: 海报图",
+            "type": "string",
+            "default": "海报图"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      }
+    }
+  },
+  "vertex_manual_config": {
+    "description": "Vertex AI 手动配置（不走系统提供商，双指令双模型）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 Vertex 手动配置",
+        "type": "bool",
+        "default": false
+      },
+      "base_url": {
+        "description": "Vertex API Base URL",
+        "type": "string",
+        "default": "https://aiplatform.googleapis.com"
+      },
+      "api_version": {
+        "description": "API 版本",
+        "hint": "建议 v1beta1 或 v1",
+        "type": "string",
+        "default": "v1beta1"
+      },
+      "location": {
+        "description": "区域",
+        "hint": "例如 global / us-central1",
+        "type": "string",
+        "default": "global"
+      },
+      "keys": {
+        "description": "Vertex Keys 列表",
+        "type": "list",
+        "default": [],
+        "hint": "每项格式: API_KEY|PROJECT_ID"
+      },
+      "vertex_1": {
+        "description": "Vertex 模型1",
+        "type": "object",
+        "items": {
+          "command": {
+            "description": "触发命令",
+            "hint": "例如: vertex图",
+            "type": "string",
+            "default": "vertex图"
+          },
+          "model": {
+            "description": "模型ID",
+            "hint": "例如 gemini-3-pro-image-preview",
+            "type": "string",
+            "default": "gemini-3-pro-image-preview"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      },
+      "vertex_2": {
+        "description": "Vertex 模型2",
+        "type": "object",
+        "items": {
+          "command": {
+            "description": "触发命令",
+            "hint": "例如: vertex图2",
+            "type": "string",
+            "default": "vertex图2"
+          },
+          "model": {
+            "description": "模型ID",
+            "hint": "例如 gemini-2.5-flash-image-preview",
+            "type": "string",
+            "default": "gemini-2.5-flash-image-preview"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      }
+    }
+  },
+  "generate_config": {
+    "description": "生图参数",
+    "type": "object",
+    "items": {
+      "timeout": {
+        "description": "生图超时时间（秒）",
+        "hint": "生成图片的最长等待时间,超时将返回错误",
+        "type": "int",
+        "default": 180
+      },
+      "max_image_size_mb": {
+        "description": "最大图片大小(MB)",
+        "hint": "用户上传的参考图片最大允许大小",
+        "type": "int",
+        "default": 10
+      }
+    }
+  },
+  "permission_config": {
+    "description": "权限配置",
+    "type": "object",
+    "items": {
+      "mode": {
+        "description": "模式",
+        "type": "string",
+        "default": "disable",
+        "options": ["disable", "blacklist", "whitelist"],
+        "hint": "disable: 不启用; blacklist: 黑名单模式; whitelist: 白名单模式"
+      },
+      "users": {
+        "description": "用户列表",
+        "type": "list",
+        "default": [],
+        "hint": "填入用户ID (QQ号等)"
+      },
+      "groups": {
+        "description": "群组列表",
+        "type": "list",
+        "default": [],
+        "hint": "填入群组ID"
+      },
+      "no_permission_reply": {
+        "description": "无权限回复语",
+        "type": "string",
+        "default": "❌ 您没有权限使用此功能",
+        "hint": "当用户没有权限时回复的内容"
+      },
+      "silent_on_no_permission": {
+        "description": "无权限时静默",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，当用户没有权限时将不回复任何消息"
+      }
+    }
+  },
+  "quota_config": {
+    "description": "免费次数配置",
+    "type": "object",
+    "items": {
+      "enable_daily_quota": {
+        "description": "启用每日免费次数",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，每个用户每天有固定免费次数"
+      },
+      "daily_free_count": {
+        "description": "每人每日免费次数",
+        "type": "int",
+        "default": 3,
+        "hint": "每天 00:00 自动重置"
+      },
+      "quota_exceeded_reply": {
+        "description": "次数用尽回复语",
+        "type": "string",
+        "default": "❌ 今日免费生图次数已用完，请明天再试。",
+        "hint": "当用户超过当日免费次数时的回复"
+      }
+    }
+  }
+}
