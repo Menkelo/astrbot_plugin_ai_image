@@ -80,9 +80,17 @@ class Gemini_Images(Star):
             logger.error(f"卸载清理出错: {e}")
 
     def _get_http_session(self) -> aiohttp.ClientSession:
-        """获取共享的 aiohttp 会话（懒加载），由插件统一在 terminate 时关闭。"""
+        """获取共享的 aiohttp 会话（懒加载），由插件统一在 terminate 时关闭。
+
+        设置连接数上限与 DNS 缓存，避免高并发时句柄耗尽；
+        默认超时仅作兜底，单次请求仍以各自传入的 timeout 为准。
+        """
         if self._http_session is None or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession()
+            connector = aiohttp.TCPConnector(limit=64, ttl_dns_cache=300)
+            self._http_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+            )
         return self._http_session
 
     def _resolve_quota_file(self) -> Path:
@@ -718,59 +726,20 @@ class Gemini_Images(Star):
     # Core Handler
     # =========================
 
-    async def _handle_generate(self, event: AstrMessageEvent, slot: SlotConfig):
-        user_id = str(event.get_sender_id() or event.unified_msg_origin)
-        group_id = event.message_obj.group_id or ""
+    def _resolve_preset(
+        self, full_text: str
+    ) -> tuple[str | None, str, str, bool]:
+        """匹配全局预设。
 
-        # 机器人管理员自动等同白名单用户（权限/免次数/高分辨率）
-        is_admin = self._is_event_admin(event)
-
-        mode = (self.perm_mode or "disable").strip()
-
-        if mode == "blacklist":
-            if not self._check_permission(user_id, group_id, is_admin):
-                if not self.perm_silent:
-                    yield event.plain_result(self.perm_no_permission_reply)
-                return
-        elif mode == "whitelist":
-            pass
-        else:
-            if not self._check_permission(user_id, group_id, is_admin):
-                if not self.perm_silent:
-                    yield event.plain_result(self.perm_no_permission_reply)
-                return
-
-        provider = self._resolve_provider_with_fallback(slot)
-        if not provider:
-            yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
-            return
-
-        ok, remain = await self._check_and_consume_quota(user_id, group_id, is_admin)
-        if not ok:
-            yield event.plain_result(self.quota_exceeded_reply)
-            return
-
-        # remain >= 0 表示本次确实扣除了次数（豁免/不限次时为 -1）
-        quota_consumed = remain >= 0
-
-        masked_uid = user_id[:4] + "****" + user_id[-4:] if len(user_id) > 8 else user_id
-        user_input = (event.message_str or "").strip()
-
-        plain_text = self._extract_plain_text_without_mentions(event)
-        full_text = self._strip_command_prefix(plain_text, slot.command)
-
-        logger.info(
-            f"收到生图指令 - 命令: /{slot.command}, 用户: {masked_uid}, "
-            f"原始输入: {user_input}, 纯文本提示词: {full_text}"
-        )
-
-        matched_preset_name = None
+        返回 (预设名, 预设提示词, 额外提示词, 是否含额外提示词)。
+        未命中预设时预设名为 None，full_text 全部作为额外提示词。
+        """
+        matched_preset_name: str | None = None
         raw_preset_text = ""
         raw_extra_text = ""
         has_extra = False
 
         preset_hub = getattr(self.context, "preset_hub", None)
-        matched = False
 
         if full_text and preset_hub and hasattr(preset_hub, "get_all_keys"):
             all_keys = preset_hub.get_all_keys()
@@ -803,19 +772,104 @@ class Gemini_Images(Star):
                         if json_ratio:
                             raw_preset_text += f" {json_ratio}"
 
-                        if prompt_lower == key_lower:
-                            raw_extra_text = ""
-                        else:
+                        if prompt_lower != key_lower:
                             raw_extra_text = full_text[len(key):].strip()
                             if raw_extra_text:
                                 has_extra = True
 
-                        matched = True
                         logger.info(f"命中全局预设: [{key}]")
                         break
 
-        if not matched:
+        if not matched_preset_name:
             raw_extra_text = full_text
+
+        return matched_preset_name, raw_preset_text, raw_extra_text, has_extra
+
+    def _build_status_message(
+        self,
+        provider: ProviderConfig,
+        matched_preset_name: str | None,
+        has_extra: bool,
+        final_ratio: str | None,
+        images_count: int,
+        remain: int,
+        final_resolution: str,
+    ) -> str:
+        """构造发给用户的"正在生图"状态提示。"""
+        msg = "🎨 正在生图 "
+
+        if matched_preset_name:
+            msg += f"「预设：{matched_preset_name}」"
+
+        if has_extra:
+            msg += "(已衔接额外提示词)"
+
+        if final_ratio:
+            msg += f" [比例: {final_ratio}]"
+
+        if images_count:
+            msg += f" [{images_count}张参考图]"
+
+        if remain >= 0:
+            msg += f" [今日剩余: {remain}]"
+        else:
+            msg += " [不限次]"
+
+        msg += f" [模型: {provider.model}]"
+
+        # 仅 Vertex 渠道显示分辨率/画质提示
+        if provider.api_type == "vertex":
+            msg += f" [分辨率: {final_resolution}]"
+
+        return msg
+
+    async def _handle_generate(self, event: AstrMessageEvent, slot: SlotConfig):
+        user_id = str(event.get_sender_id() or event.unified_msg_origin)
+        group_id = event.message_obj.group_id or ""
+
+        # 机器人管理员自动等同白名单用户（权限/免次数/高分辨率）
+        is_admin = self._is_event_admin(event)
+
+        # whitelist 模式不在此拦截（白名单语义为 VIP 特权，对所有人开放生图）；
+        # blacklist / disable 等其余模式走权限校验。
+        mode = (self.perm_mode or "disable").strip()
+        if mode != "whitelist" and not self._check_permission(
+            user_id, group_id, is_admin
+        ):
+            if not self.perm_silent:
+                yield event.plain_result(self.perm_no_permission_reply)
+            return
+
+        provider = self._resolve_provider_with_fallback(slot)
+        if not provider:
+            yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
+            return
+
+        ok, remain = await self._check_and_consume_quota(user_id, group_id, is_admin)
+        if not ok:
+            yield event.plain_result(self.quota_exceeded_reply)
+            return
+
+        # remain >= 0 表示本次确实扣除了次数（豁免/不限次时为 -1）
+        quota_consumed = remain >= 0
+
+        masked_uid = user_id[:4] + "****" + user_id[-4:] if len(user_id) > 8 else user_id
+        user_input = (event.message_str or "").strip()
+
+        plain_text = self._extract_plain_text_without_mentions(event)
+        full_text = self._strip_command_prefix(plain_text, slot.command)
+
+        logger.info(
+            f"收到生图指令 - 命令: /{slot.command}, 用户: {masked_uid}, "
+            f"原始输入: {user_input}, 纯文本提示词: {full_text}"
+        )
+
+        (
+            matched_preset_name,
+            raw_preset_text,
+            raw_extra_text,
+            has_extra,
+        ) = self._resolve_preset(full_text)
 
         if not raw_preset_text and not raw_extra_text:
             yield event.plain_result("❌ 请提供图片生成的提示词或预设名称！")
@@ -858,32 +912,18 @@ class Gemini_Images(Star):
         else:
             final_prompt = clean_extra_text
 
-        msg = "🎨 正在生图 "
-
-        if matched_preset_name:
-            msg += f"「预设：{matched_preset_name}」"
-
-        if has_extra:
-            msg += "(已衔接额外提示词)"
-
-        if final_ratio:
-            msg += f" [比例: {final_ratio}]"
-
-        if images_data:
-            msg += f" [{len(images_data)}张参考图]"
-
-        if remain >= 0:
-            msg += f" [今日剩余: {remain}]"
-        else:
-            msg += " [不限次]"
-
-        msg += f" [模型: {provider.model}]"
-        
-        # 仅 Vertex 渠道显示分辨率/画质提示
-        if provider.api_type == "vertex":
-            msg += f" [分辨率: {final_resolution}]"
-
-        yield event.plain_result(msg + "...")
+        yield event.plain_result(
+            self._build_status_message(
+                provider=provider,
+                matched_preset_name=matched_preset_name,
+                has_extra=has_extra,
+                final_ratio=final_ratio,
+                images_count=len(images_data),
+                remain=remain,
+                final_resolution=final_resolution,
+            )
+            + "..."
+        )
 
         task_id = hashlib.md5(
             f"{time.time()}{user_id}{slot.command}".encode()
@@ -914,34 +954,43 @@ class Gemini_Images(Star):
     # Image Fetching
     # =========================
 
+    async def _fetch_avatar_tuple(self, uid: str) -> tuple[bytes, str] | None:
+        avatar_data = await self.get_avatar(uid)
+        if avatar_data:
+            return avatar_data, "image/jpeg"
+        return None
+
     async def _fetch_images_from_event(
         self,
         event: AstrMessageEvent,
     ) -> list[tuple[bytes, str]]:
-        images_data = []
+        images_data: list[tuple[bytes, str]] = []
 
         if not event.message_obj.message:
             return images_data
+
+        # 收集下载协程并发执行，保持消息中出现的先后顺序
+        tasks: list = []
+        self_id = str(event.get_self_id()).strip()
 
         for component in event.message_obj.message:
             if isinstance(component, Comp.Image):
                 url = component.url or component.file
                 if url:
-                    data = await self._download_image(url)
-                    if data:
-                        images_data.append(data)
+                    tasks.append(self._download_image(url))
 
             elif isinstance(component, Comp.At):
                 if component.qq != "all":
                     uid = str(component.qq)
-                    self_id = str(event.get_self_id()).strip()
-
                     if self_id and uid == self_id:
                         continue
+                    tasks.append(self._fetch_avatar_tuple(uid))
 
-                    avatar_data = await self.get_avatar(uid)
-                    if avatar_data:
-                        images_data.append((avatar_data, "image/jpeg"))
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, tuple) and r:
+                    images_data.append(r)
 
         reply_comp = next(
             (c for c in event.message_obj.message if isinstance(c, Comp.Reply)),
@@ -958,15 +1007,22 @@ class Gemini_Images(Star):
                     message_content = resp.get("message")
 
                     if isinstance(message_content, list):
+                        reply_urls = []
                         for seg in message_content:
                             if seg.get("type") == "image":
                                 data = seg.get("data", {})
                                 url = data.get("url") or data.get("file")
-
                                 if url:
-                                    img_data = await self._download_image(url)
-                                    if img_data:
-                                        images_data.append(img_data)
+                                    reply_urls.append(url)
+
+                        if reply_urls:
+                            dl = await asyncio.gather(
+                                *[self._download_image(u) for u in reply_urls],
+                                return_exceptions=True,
+                            )
+                            for r in dl:
+                                if isinstance(r, tuple) and r:
+                                    images_data.append(r)
             except Exception as e:
                 logger.debug(f"NapCat get_msg failed: {e}")
 

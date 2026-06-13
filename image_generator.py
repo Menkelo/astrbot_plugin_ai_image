@@ -213,7 +213,7 @@ class AIImageGenerator:
             or b.startswith(b"\x89PNG")
             or b.startswith(b"GIF")
             or (b.startswith(b"RIFF") and len(b) > 12 and b[8:12] == b"WEBP")
-            or b.startswith(b"\x00\x00\x00")  # 部分 heic/heif 容器
+            or (len(b) > 12 and b[4:8] == b"ftyp")  # heic/heif/mp4 等 ISOBMFF 容器
         )
 
     async def _read_response_payload(
@@ -951,7 +951,8 @@ class AIImageGenerator:
             )
 
         try:
-            payload = self._build_openai_payload(
+            payload = await asyncio.to_thread(
+                self._build_openai_payload,
                 config,
                 prompt,
                 images_data,
@@ -1211,7 +1212,8 @@ class AIImageGenerator:
                 prompt, aspect_ratio, images_data
             )
 
-            payload = self._build_gemini_payload(
+            payload = await asyncio.to_thread(
+                self._build_gemini_payload,
                 final_prompt,
                 images_data,
                 aspect_ratio,
@@ -1272,7 +1274,8 @@ class AIImageGenerator:
                 prompt, aspect_ratio, images_data
             )
 
-            payload = self._build_gemini_payload(
+            payload = await asyncio.to_thread(
+                self._build_gemini_payload,
                 final_prompt,
                 images_data,
                 aspect_ratio,
@@ -1405,7 +1408,9 @@ class AIImageGenerator:
                 return self._try_decode_image_base64(url)
 
             session = self._get_session()
-            async with session.get(url, timeout=30) as resp:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     if self._is_image_bytes(data):
