@@ -14,7 +14,7 @@ from io import BytesIO
 from dataclasses import dataclass
 
 import aiohttp
-from PIL import Image
+from PIL import Image, ImageOps
 
 from astrbot.api import logger
 
@@ -508,6 +508,30 @@ class AIImageGenerator:
     # Image Format / Ratio
     # =========================
 
+    def _sync_normalize_orientation(self, image_data: bytes) -> bytes:
+        """
+        将 EXIF Orientation 应用到像素并移除方向标签，防止聊天端/浏览器
+        按 EXIF 自动旋转导致图片打横。
+        仅当 JPEG 携带非默认方向（≠1）时才重新编码，否则原样返回。
+        """
+        try:
+            if not image_data.startswith(b"\xff\xd8"):
+                return image_data
+
+            img = Image.open(BytesIO(image_data))
+            orientation = img.getexif().get(0x0112)
+            if not orientation or orientation == 1:
+                return image_data
+
+            img = ImageOps.exif_transpose(img)
+            img.info.pop("exif", None)
+            img.info.pop("parsed_exif", None)
+            out = BytesIO()
+            img.save(out, format="JPEG", quality=95)
+            return out.getvalue()
+        except Exception:
+            return image_data
+
     def _sync_convert_image_format(
         self,
         image_data: bytes,
@@ -515,6 +539,7 @@ class AIImageGenerator:
     ) -> tuple[bytes, str]:
         try:
             img = Image.open(BytesIO(image_data))
+            img = ImageOps.exif_transpose(img)
 
             if img.mode in ("RGBA", "LA", "P"):
                 background = Image.new("RGB", img.size, (255, 255, 255))
@@ -585,7 +610,7 @@ class AIImageGenerator:
             return image_data, "application/octet-stream"
 
         rw, rh = wh
-        img = Image.open(BytesIO(image_data)).convert("RGBA")
+        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
         w, h = img.size
 
         if w <= 0 or h <= 0:
@@ -651,7 +676,7 @@ class AIImageGenerator:
         rw, rh = wh
         dst_ratio = rw / rh
 
-        img = Image.open(BytesIO(image_data)).convert("RGBA")
+        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
         w, h = img.size
 
         if w <= 0 or h <= 0:
@@ -848,6 +873,14 @@ class AIImageGenerator:
             )
         return prompt
 
+    async def _normalize_images_orientation(self, images: list[bytes]) -> list[bytes]:
+        """对生成结果统一应用 EXIF Orientation 到像素，避免发送后打横。"""
+        normalized: list[bytes] = []
+        for b in images:
+            nb = await asyncio.to_thread(self._sync_normalize_orientation, b)
+            normalized.append(nb)
+        return normalized
+
     async def generate_image(
         self,
         prompt: str,
@@ -909,6 +942,7 @@ class AIImageGenerator:
                             aspect_ratio,
                             mode="crop",
                         )
+                    images = await self._normalize_images_orientation(images)
                     return images, None
 
                 last_error_short = self._short_api_error(error)
