@@ -10,7 +10,6 @@ from pathlib import Path
 from dataclasses import dataclass
 from collections.abc import Coroutine
 from typing import Any, Tuple, Optional, List
-from io import BytesIO
 
 import aiohttp
 
@@ -341,7 +340,8 @@ class Gemini_Images(Star):
 
         model = getattr(provider, "model", "") or p_conf.get("model") or "gemini-1.5-flash"
 
-        # api_type 判定优先级：提供商配置显式指定 > 模型名含 gemini > base_url 域名
+        # api_type 判定优先级：提供商配置显式指定 > base_url 域名/路径
+        # 注意：其他中转站用 OpenAI 兼容 /v1 路径，即使模型名含 gemini 也按 openai 处理
         api_type = p_conf.get("api_type") or ""
         if isinstance(api_type, str):
             api_type = api_type.strip().lower()
@@ -350,7 +350,7 @@ class Gemini_Images(Star):
                 api_type = "vertex"
             elif "generativelanguage.googleapis.com" in base_url:
                 api_type = "gemini"
-            elif "gemini" in (model or "").lower():
+            elif base_url.rstrip("/").endswith("/v1beta"):
                 api_type = "gemini"
             else:
                 api_type = "openai"
@@ -1198,28 +1198,12 @@ class Gemini_Images(Star):
             if reply_id:
                 components.append(Comp.Reply(id=reply_id))
 
-            # 诊断：反馈实际输出尺寸与文件大小，便于确认 2K/4K 与 PNG 输出是否落地
-            actual_label = ""
-            try:
-                from PIL import Image as PILImage
-
-                with PILImage.open(BytesIO(results[0])) as im:
-                    size_mb = len(results[0]) / (1024 * 1024)
-                    actual_label = f"{im.width}x{im.height} ({size_mb:.1f}MB)"
-            except Exception:
-                pass
-            if actual_label:
-                logger.info(f"任务完成 [{task_id}] - 实际输出: {actual_label}")
-
             for img_bytes in results:
                 try:
                     file_path = await asyncio.to_thread(save_temp_img, img_bytes)
                     components.append(Comp.Image.fromFileSystem(file_path))
                 except Exception as e:
                     logger.error(f"保存图片失败: {e}")
-
-            if actual_label:
-                components.append(Comp.Plain(f"[实际输出: {actual_label}]"))
 
             await self._safe_send_chain(event, components)
 
