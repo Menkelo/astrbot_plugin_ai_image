@@ -50,6 +50,51 @@ class AIImageGenerator:
         "9:21": (9, 21),
     }
 
+    # gpt-image-2 等 OpenAI images 路由支持的精确分辨率映射（1K/2K/4K × 比例）。
+    # 值来自 gpt-image-2 官方 SIZE_MAPPING（16 的倍数、单边 ≤ 3840、长短边比 ≤ 3:1、
+    # 总像素 655360~8294400）。其中 9:21 为 21:9 的对称补全。
+    GPT_IMAGE_SIZES: dict[str, dict[str, str]] = {
+        "1K": {
+            "1:1": "1024x1024",
+            "16:9": "1280x720",
+            "9:16": "720x1280",
+            "5:4": "1040x832",
+            "4:5": "832x1040",
+            "4:3": "1024x768",
+            "3:4": "768x1024",
+            "3:2": "1008x672",
+            "2:3": "672x1008",
+            "21:9": "1344x576",
+            "9:21": "576x1344",
+        },
+        "2K": {
+            "1:1": "2048x2048",
+            "16:9": "2048x1152",
+            "9:16": "1152x2048",
+            "5:4": "2080x1664",
+            "4:5": "1664x2080",
+            "4:3": "2048x1536",
+            "3:4": "1536x2048",
+            "3:2": "2064x1376",
+            "2:3": "1376x2064",
+            "21:9": "2016x864",
+            "9:21": "864x2016",
+        },
+        "4K": {
+            "1:1": "2880x2880",
+            "16:9": "3840x2160",
+            "9:16": "2160x3840",
+            "5:4": "3200x2560",
+            "4:5": "2560x3200",
+            "4:3": "3264x2448",
+            "3:4": "2448x3264",
+            "3:2": "3504x2336",
+            "2:3": "2336x3504",
+            "21:9": "3808x1632",
+            "9:21": "1632x3808",
+        },
+    }
+
     # 分辨率档位对应的目标长边（像素）。
     # 用于提供商原生不支持 imageSize 参数时，生成后按目标长边提升尺寸，
     # 保证配置面板/指令指定的 1K/2K/4K 始终生效。
@@ -837,10 +882,23 @@ class AIImageGenerator:
         image_size: str | None,
         aspect_ratio: str | None,
     ) -> str:
-        base_map = {"1K": 1024, "2K": 1536, "4K": 2048}
-        base = base_map.get((image_size or "1K").upper(), 1024)
+        """构造 OpenAI images 路由的 size 参数。
 
-        rw, rh = self.RATIO_WH.get((aspect_ratio or "1:1").strip(), (1, 1))
+        优先使用 gpt-image-2 精确 SIZE_MAPPING（GPT_IMAGE_SIZES），确保
+        1K/2K/4K 与各比例组合命中官方支持的分辨率，避免自定义像素被
+        服务端拒绝后回退 1K。表外比例回退到 16 倍数像素计算。
+        """
+        tier = (image_size or "1K").upper()
+        ratio = (aspect_ratio or "1:1").strip()
+
+        tier_map = self.GPT_IMAGE_SIZES.get(tier)
+        if tier_map and ratio in tier_map:
+            return tier_map[ratio]
+
+        base_map = {"1K": 1024, "2K": 2048, "4K": 2880}
+        base = base_map.get(tier, 1024)
+
+        rw, rh = self.RATIO_WH.get(ratio, (1, 1))
 
         if rw == rh:
             w = h = base
@@ -1057,7 +1115,7 @@ class AIImageGenerator:
     ) -> tuple[list[bytes] | None, str | None]:
         model_name = (config.model or "").strip().lower()
 
-        if "gpt-image-2" in model_name:
+        if "gpt-image" in model_name:
             return await self._generate_openai_image_api(
                 config=config,
                 prompt=prompt,
@@ -1156,12 +1214,22 @@ class AIImageGenerator:
                 if size:
                     payload["size"] = size
 
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers={**headers_auth, "Content-Type": "application/json"},
-                    timeout=aiohttp.ClientTimeout(total=self.timeout),
-                ) as response:
+                async def _post_generations(p: dict):
+                    return await session.post(
+                        url,
+                        json=p,
+                        headers={**headers_auth, "Content-Type": "application/json"},
+                        timeout=aiohttp.ClientTimeout(total=self.timeout),
+                    )
+
+                response = await _post_generations(payload)
+                if response.status == 400 and size:
+                    # size 不被当前端点支持（严格 OpenAI 枚举值）时去掉重试，
+                    # 由生成后长边放大兜底保证 2K/4K 输出
+                    response.close()
+                    payload.pop("size", None)
+                    response = await _post_generations(payload)
+                async with response:
                     if response.status != 200:
                         body = await response.text()
                         return None, f"API {response.status}: {body[:300]}"
@@ -1182,29 +1250,38 @@ class AIImageGenerator:
                 )
 
             url = f"{config.base_url}/images/edits"
-            form = aiohttp.FormData()
-            form.add_field("model", config.model)
-            form.add_field("prompt", prompt)
-            form.add_field("response_format", "b64_json")
 
-            if size:
-                form.add_field("size", size)
+            async def _post_edits(include_size: bool):
+                form = aiohttp.FormData()
+                form.add_field("model", config.model)
+                form.add_field("prompt", prompt)
+                form.add_field("response_format", "b64_json")
 
-            for idx, (img_bytes, mime) in enumerate(images_data):
-                ext = "png" if "png" in mime else "jpg"
-                form.add_field(
-                    "image",
-                    img_bytes,
-                    filename=f"ref_{idx}.{ext}",
-                    content_type=mime,
+                if include_size and size:
+                    form.add_field("size", size)
+
+                for idx, (img_bytes, mime) in enumerate(images_data):
+                    ext = "png" if "png" in mime else "jpg"
+                    form.add_field(
+                        "image",
+                        img_bytes,
+                        filename=f"ref_{idx}.{ext}",
+                        content_type=mime,
+                    )
+
+                return await session.post(
+                    url,
+                    data=form,
+                    headers=headers_auth,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
                 )
 
-            async with session.post(
-                url,
-                data=form,
-                headers=headers_auth,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
+            response = await _post_edits(True)
+            if response.status == 400 and size:
+                # size 不被当前端点支持时去掉重试（auto），由本地长边放大兜底
+                response.close()
+                response = await _post_edits(False)
+            async with response:
                 if response.status != 200:
                     body = await response.text()
                     return None, f"API {response.status}: {body[:300]}"
