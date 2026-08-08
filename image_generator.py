@@ -927,13 +927,21 @@ class AIImageGenerator:
         aspect_ratio: str | None,
         images_data: list,
     ) -> str:
-        """带参考图且指定比例时，给提示词追加比例约束（Gemini/Vertex 共用）。"""
-        if aspect_ratio and images_data:
-            return (
-                f"输出比例必须为 {aspect_ratio}，并填满画面，不要黑边，不要留白。\n"
-                f"{prompt}"
+        """指定比例时给提示词追加比例约束（所有提供商共用，文生图/图生图均生效）。"""
+        if not aspect_ratio:
+            return prompt
+
+        if images_data:
+            constraint = (
+                f"参考图的比例为 {aspect_ratio}，输出图片必须保持该比例构图，"
+                f"并填满画面，不要黑边，不要留白。"
             )
-        return prompt
+        else:
+            constraint = (
+                f"输出图片比例必须为 {aspect_ratio}，并填满画面，不要黑边，不要留白。"
+            )
+
+        return f"{constraint}\n{prompt}"
 
     async def _normalize_images_orientation(self, images: list[bytes]) -> list[bytes]:
         """对生成结果统一应用 EXIF Orientation 到像素，避免发送后打横。"""
@@ -1006,7 +1014,9 @@ class AIImageGenerator:
                     )
 
                 if images:
-                    if aspect_ratio and converted_images:
+                    # 比例兜底：无论文生图/图生图、模型是否遵守 aspectRatio，
+                    # 统一裁剪到目标比例，保证比例始终生效
+                    if aspect_ratio:
                         images = await self._post_fix_images_ratio(
                             images,
                             aspect_ratio,
@@ -1057,10 +1067,14 @@ class AIImageGenerator:
             )
 
         try:
+            final_prompt = self._augment_prompt_for_ratio(
+                prompt, aspect_ratio, images_data
+            )
+
             payload = await asyncio.to_thread(
                 self._build_openai_payload,
                 config,
-                prompt,
+                final_prompt,
                 images_data,
                 aspect_ratio,
                 image_size,
@@ -1120,6 +1134,11 @@ class AIImageGenerator:
                 final_ratio = self._infer_ratio_from_images(images_data)
 
             size = self._build_openai_size(image_size, final_ratio)
+
+            if final_ratio:
+                prompt = self._augment_prompt_for_ratio(
+                    prompt, final_ratio, images_data
+                )
 
             logger.info(
                 f"OpenAI images route: aspect_ratio={aspect_ratio}, "

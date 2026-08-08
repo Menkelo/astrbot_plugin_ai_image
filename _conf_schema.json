@@ -25,6 +25,13 @@
             "type": "string",
             "default": "1K",
             "options": ["1K", "2K", "4K"]
+          },
+          "default_aspect_ratio": {
+            "description": "默认比例",
+            "hint": "自动: 不指定（图生图时按参考图比例）",
+            "type": "string",
+            "default": "自动",
+            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
           }
         }
       },
@@ -50,6 +57,13 @@
             "type": "string",
             "default": "1K",
             "options": ["1K", "2K", "4K"]
+          },
+          "default_aspect_ratio": {
+            "description": "默认比例",
+            "hint": "自动: 不指定（图生图时按参考图比例）",
+            "type": "string",
+            "default": "自动",
+            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
           }
         }
       },
@@ -75,6 +89,13 @@
             "type": "string",
             "default": "1K",
             "options": ["1K", "2K", "4K"]
+          },
+          "default_aspect_ratio": {
+            "description": "默认比例",
+            "hint": "自动: 不指定（图生图时按参考图比例）",
+            "type": "string",
+            "default": "自动",
+            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
           }
         }
       }

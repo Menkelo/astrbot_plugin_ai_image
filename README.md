@@ -53,14 +53,17 @@
 | `provider_1.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_1.command` | string | `”生图”` | 触发命令名称 |
 | `provider_1.default_resolution` | string | `”1K”` | 默认分辨率<br>可选：`1K`、`2K`、`4K` |
+| `provider_1.default_aspect_ratio` | string | `”自动”` | 默认比例<br>可选：`自动`、`1:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`<br>`自动`：不指定（图生图时按参考图比例） |
 | **provider_2** | object | - | 提供商槽位 2（默认命令 `/动漫图`） |
 | `provider_2.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_2.command` | string | `”动漫图”` | 触发命令名称 |
 | `provider_2.default_resolution` | string | `”1K”` | 默认分辨率 |
+| `provider_2.default_aspect_ratio` | string | `”自动”` | 默认比例（同上） |
 | **provider_3** | object | - | 提供商槽位 3（默认命令 `/海报图`） |
 | `provider_3.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_3.command` | string | `”海报图”` | 触发命令名称 |
 | `provider_3.default_resolution` | string | `”1K”` | 默认分辨率 |
+| `provider_3.default_aspect_ratio` | string | `”自动”` | 默认比例（同上） |
 
 #### vertex_manual_config（Vertex AI 手动配置）
 

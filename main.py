@@ -30,6 +30,7 @@ class SlotConfig:
     provider_id: str
     provider: ProviderConfig | None
     default_resolution: str
+    default_aspect_ratio: str
 
 
 class Gemini_Images(Star):
@@ -229,6 +230,7 @@ class Gemini_Images(Star):
                 provider_id=p1_id,
                 provider=self._parse_provider(p1_id),
                 default_resolution=(p1.get("default_resolution", "1K") or "1K").strip(),
+                default_aspect_ratio=(p1.get("default_aspect_ratio", "自动") or "自动").strip(),
             ),
             SlotConfig(
                 slot_name="provider_2",
@@ -236,6 +238,7 @@ class Gemini_Images(Star):
                 provider_id=p2_id,
                 provider=self._parse_provider(p2_id),
                 default_resolution=(p2.get("default_resolution", "1K") or "1K").strip(),
+                default_aspect_ratio=(p2.get("default_aspect_ratio", "自动") or "自动").strip(),
             ),
             SlotConfig(
                 slot_name="provider_3",
@@ -243,6 +246,7 @@ class Gemini_Images(Star):
                 provider_id=p3_id,
                 provider=self._parse_provider(p3_id),
                 default_resolution=(p3.get("default_resolution", "1K") or "1K").strip(),
+                default_aspect_ratio=(p3.get("default_aspect_ratio", "自动") or "自动").strip(),
             ),
         ]
 
@@ -282,6 +286,7 @@ class Gemini_Images(Star):
                     provider_id="__manual_vertex_1__",
                     provider=vertex_provider_1,
                     default_resolution=self.vertex_1_default_resolution,
+                    default_aspect_ratio="自动",
                 )
             )
 
@@ -292,6 +297,7 @@ class Gemini_Images(Star):
                     provider_id="__manual_vertex_2__",
                     provider=vertex_provider_2,
                     default_resolution=self.vertex_2_default_resolution,
+                    default_aspect_ratio="自动",
                 )
             )
 
@@ -888,7 +894,12 @@ class Gemini_Images(Star):
 
         clean_preset_text, preset_ratio = self._extract_ratio(raw_preset_text)
         clean_extra_text, extra_ratio = self._extract_ratio(raw_extra_text)
-        final_ratio = extra_ratio if extra_ratio else preset_ratio
+
+        # 比例优先级：指令内嵌 > 预设指定 > 槽位配置默认比例（"自动"则不指定）
+        slot_ratio = (slot.default_aspect_ratio or "自动").strip()
+        if slot_ratio == "自动":
+            slot_ratio = None
+        final_ratio = extra_ratio or preset_ratio or slot_ratio
 
         # 分辨率关键词（1K/2K/4K）对所有提供商统一解析，
         # 不再局限于 Vertex 渠道（原生 imageSize + 生成后落地保证生效）。
