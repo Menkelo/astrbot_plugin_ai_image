@@ -1026,34 +1026,84 @@ class Gemini_Images(Star):
 
         if reply_comp and reply_comp.id:
             try:
-                if event.bot:
-                    resp = await event.bot.api.call_action(
-                        "get_msg",
-                        message_id=int(reply_comp.id),
-                    )
-                    message_content = resp.get("message")
+                if not event.bot:
+                    return images_data
 
-                    if isinstance(message_content, list):
-                        reply_urls = []
-                        for seg in message_content:
-                            if seg.get("type") == "image":
-                                data = seg.get("data", {})
-                                url = data.get("url") or data.get("file")
-                                if url:
-                                    reply_urls.append(url)
+                mid = reply_comp.id
+                if not isinstance(mid, int):
+                    try:
+                        mid = int(str(mid).strip())
+                    except (TypeError, ValueError):
+                        mid = None
+                if mid is None:
+                    return images_data
 
-                        if reply_urls:
-                            dl = await asyncio.gather(
-                                *[self._download_image(u) for u in reply_urls],
-                                return_exceptions=True,
-                            )
-                            for r in dl:
-                                if isinstance(r, tuple) and r:
-                                    images_data.append(r)
+                resp = await event.bot.api.call_action("get_msg", message_id=mid)
+                reply_urls = self._extract_image_urls_from_msg(resp)
+                if not reply_urls:
+                    return images_data
+
+                dl = await asyncio.gather(
+                    *[self._download_image(u) for u in reply_urls],
+                    return_exceptions=True,
+                )
+                reply_images = [r for r in dl if isinstance(r, tuple) and r]
+                # 引用图片作为图一，插入最前；附带图片按原顺序排在后面
+                images_data[0:0] = reply_images
             except Exception as e:
-                logger.debug(f"NapCat get_msg failed: {e}")
+                logger.debug(f"get_msg 获取引用图片失败: {e}")
 
         return images_data
+
+    @staticmethod
+    def _extract_image_urls_from_msg(msg) -> list[str]:
+        """从 get_msg 返回内容中提取可下载的图片 URL。
+
+        兼容三种结构：
+        - list[dict]：标准 OneBot11 segments（如 NapCat get_msg 的 message 字段）
+        - str：CQ 码（[CQ:image,file=xxx,url=http://...]）
+        - dict：包装 message/segments/messages 字段，或直接含 data 的响应
+        仅返回含协议头的 URL，避免把本地文件名（xxx.image）当作可下载链接。
+        """
+
+        def pick(seg_data: dict) -> str | None:
+            if not isinstance(seg_data, dict):
+                return None
+            for k in ("url", "file", "path"):
+                v = seg_data.get(k)
+                if isinstance(v, str) and v and "://" in v:
+                    return v
+            return None
+
+        def parse(segments) -> None:
+            if isinstance(segments, list):
+                for seg in segments:
+                    if isinstance(seg, dict) and seg.get("type") == "image":
+                        if u := pick(seg.get("data", {})):
+                            urls.append(u)
+            elif isinstance(segments, str):
+                for m in re.finditer(r"\[CQ:image[^\]]*\]", segments):
+                    fields = dict(
+                        re.findall(r"([a-zA-Z_]+)=([^,\]]*)", m.group(0))
+                    )
+                    if u := pick(fields):
+                        urls.append(u)
+
+        urls: list[str] = []
+        if isinstance(msg, dict):
+            handled = False
+            for key in ("message", "segments", "messages"):
+                if msg.get(key):
+                    parse(msg.get(key))
+                    handled = True
+            if not handled:
+                if u := pick(msg.get("data")):
+                    urls.append(u)
+        else:
+            parse(msg)
+
+        seen: set[str] = set()
+        return [u for u in urls if not (u in seen or seen.add(u))]
 
     @staticmethod
     async def get_avatar(user_id: str) -> bytes | None:
