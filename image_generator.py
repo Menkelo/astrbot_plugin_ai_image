@@ -1465,11 +1465,22 @@ class AIImageGenerator:
         image_size: str | None,
     ) -> tuple[list[bytes] | None, str | None]:
         try:
-            url = f"{config.base_url}/v1beta/models/{config.model}:generateContent"
+            base = config.base_url.rstrip("/")
+            if base.endswith("/v1beta"):
+                url = f"{base}/models/{config.model}:generateContent"
+            else:
+                url = f"{base}/v1beta/models/{config.model}:generateContent"
+
             headers = {
                 "Content-Type": "application/json",
                 "x-goog-api-key": config.api_key,
             }
+            # 非 Google 官方域名的中转站，同时携带 Bearer 兜底，兼容不识别 x-goog-api-key 的网关
+            if (
+                "generativelanguage.googleapis.com" not in base
+                and "aiplatform.googleapis.com" not in base
+            ):
+                headers["Authorization"] = f"Bearer {config.api_key}"
 
             final_prompt = self._augment_prompt_for_ratio(
                 prompt, aspect_ratio, images_data

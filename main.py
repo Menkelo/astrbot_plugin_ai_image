@@ -341,11 +341,19 @@ class Gemini_Images(Star):
 
         model = getattr(provider, "model", "") or p_conf.get("model") or "gemini-1.5-flash"
 
-        api_type = "gemini"
-        if "aiplatform.googleapis.com" in base_url:
-            api_type = "vertex"
-        elif "generativelanguage.googleapis.com" not in base_url:
-            api_type = "openai"
+        # api_type 判定优先级：提供商配置显式指定 > 模型名含 gemini > base_url 域名
+        api_type = p_conf.get("api_type") or ""
+        if isinstance(api_type, str):
+            api_type = api_type.strip().lower()
+        if api_type not in ("gemini", "openai", "vertex"):
+            if "aiplatform.googleapis.com" in base_url:
+                api_type = "vertex"
+            elif "generativelanguage.googleapis.com" in base_url:
+                api_type = "gemini"
+            elif "gemini" in (model or "").lower():
+                api_type = "gemini"
+            else:
+                api_type = "openai"
 
         if not api_key and api_type != "vertex":
             logger.warning(f"提供商 {provider_id} 缺少 API Key")
