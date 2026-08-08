@@ -853,16 +853,41 @@ class AIImageGenerator:
         except Exception:
             return image_data
 
+    def _resolution_target_long_edge(
+        self,
+        image_size: str | None,
+        aspect_ratio: str | None,
+    ) -> int:
+        """计算目标分辨率档位的长边像素。
+
+        优先按 gpt-image-2 精确 SIZE_MAPPING 取对应档位+比例的标准长边
+        （如 4K 1:1=2880、4K 16:9=3840），避免把模型原生 4K 图再放大到
+        4096 造成无效插值；表外档位/比例回退到通用档位长边。
+        """
+        tier = (image_size or "1K").strip().upper()
+        ratio = (aspect_ratio or "1:1").strip()
+
+        tier_map = self.GPT_IMAGE_SIZES.get(tier)
+        if tier_map and ratio in tier_map:
+            w, h = (int(x) for x in tier_map[ratio].split("x"))
+            return max(w, h)
+
+        return self.RESOLUTION_LONG_EDGE.get(tier, 1024)
+
     async def _enforce_resolution(
         self,
         images: list[bytes],
         image_size: str | None,
+        aspect_ratio: str | None = None,
     ) -> list[bytes]:
-        """按目标分辨率档位提升生成图片尺寸，保证 1K/2K/4K 生效。"""
+        """按目标分辨率档位提升生成图片尺寸，保证 1K/2K/4K 生效。
+
+        目标长边按档位+比例精确计算，API 已生成标准尺寸时不再放大。
+        """
         if not images:
             return images
 
-        target = self.RESOLUTION_LONG_EDGE.get((image_size or "1K").strip().upper())
+        target = self._resolution_target_long_edge(image_size, aspect_ratio)
         if not target:
             return images
 
@@ -1081,7 +1106,11 @@ class AIImageGenerator:
                             mode="crop",
                         )
                     # 分辨率落地：模型未按 imageSize 达到目标时，放大到目标长边
-                    images = await self._enforce_resolution(images, image_size)
+                    images = await self._enforce_resolution(
+                        images,
+                        image_size,
+                        aspect_ratio,
+                    )
                     images = await self._normalize_images_orientation(images)
                     return images, None
 
