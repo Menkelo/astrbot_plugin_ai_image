@@ -34,7 +34,7 @@
 - ✅ **文生图**：根据文字描述生成图片。
 - ✅ **图生图**：基于参考图片（支持多张）生成新图片。
 - ✅ **智能参考图**：自动识别消息、引用消息中的图片，以及通过@用户获取其头像作为参考图。
-- ✅ **比例与分辨率控制**：支持 11 种宽高比（如 1:1、16:9、竖屏等），Vertex 渠道支持 1K/2K/4K 分辨率。
+- ✅ **比例与分辨率控制**：支持 11 种宽高比（如 1:1、16:9、竖屏等），支持 1K/2K/4K 分辨率（Vertex 渠道白名单可用全部档位）。
 - ✅ **智能比例识别**：图生图时自动推断参考图比例，无需手动指定。
 - ✅ **全局预设系统**：使用 AstrBot 全局预设，支持快速调用，可动态管理（增/删）。
 - ✅ **多 API Key 轮询**（Vertex）：Vertex 渠道支持配置多组凭证，失败或限流时自动切换。
@@ -52,15 +52,15 @@
 | **provider_1** | object | - | 提供商槽位 1（默认命令 `/生图`） |
 | `provider_1.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_1.command` | string | `”生图”` | 触发命令名称 |
-| `provider_1.default_resolution` | string | `”1K”` | 默认分辨率（仅 Vertex 渠道生效）<br>可选：`1K`、`2K`、`4K` |
+| `provider_1.default_resolution` | string | `”1K”` | 默认分辨率<br>可选：`1K`、`2K`、`4K` |
 | **provider_2** | object | - | 提供商槽位 2（默认命令 `/动漫图`） |
 | `provider_2.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_2.command` | string | `”动漫图”` | 触发命令名称 |
-| `provider_2.default_resolution` | string | `”1K”` | 默认分辨率（仅 Vertex 渠道生效） |
+| `provider_2.default_resolution` | string | `”1K”` | 默认分辨率 |
 | **provider_3** | object | - | 提供商槽位 3（默认命令 `/海报图`） |
 | `provider_3.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_3.command` | string | `”海报图”` | 触发命令名称 |
-| `provider_3.default_resolution` | string | `”1K”` | 默认分辨率（仅 Vertex 渠道生效） |
+| `provider_3.default_resolution` | string | `”1K”` | 默认分辨率 |
 
 #### vertex_manual_config（Vertex AI 手动配置）
 
@@ -110,7 +110,7 @@
 > **注意事项：**
 > - 机器人管理员（AstrBot 全局配置中的管理员）自动等同白名单用户，无需手动将其 QQ 添加到 `permission_config.users`。
 > - 白名单用户（`permission_config.users`）不受每日次数限制。
-> - Vertex 渠道的分辨率控制：白名单用户可使用 1K/2K/4K，非白名单用户强制 1K。
+> - 分辨率控制（1K/2K/4K）：Gemini/OpenAI 渠道全部用户均可指定；Vertex 渠道白名单用户及管理员可指定，非白名单用户强制 1K。
 > - 插件会自动识别提供商的 API 类型（Gemini/OpenAI/Vertex），无需手动指定。
 
 ### 使用示例
@@ -127,10 +127,10 @@
 /生图 壁纸 21:9
 ```
 
-#### 指定分辨率（Vertex 渠道）
+#### 指定分辨率
 ```
-/vertex图 高清壁纸 4K
-/vertex图 城市夜景 16:9 2K
+/生图 高清壁纸 4K
+/生图 城市夜景 16:9 2K
 ```
 
 #### 使用预设
@@ -175,7 +175,7 @@
 ```
 
 > 支持的比例：`1:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`  
-> 支持的分辨率（仅 Vertex 渠道）：`1K`、`2K`、`4K`
+> 支持的分辨率：`1K`、`2K`、`4K`
 
 **💡 预设联动**：可对接全局预设 [astrbot_plugin_preset_hub](https://github.com/Menkelo/astrbot_plugin_preset_hub)，统一管理预设库。
 
@@ -191,7 +191,7 @@ A: 使用 3 个提供商槽位分别绑定不同模型，或启用 Vertex 手动
 A: 插件内置 3 次自动重试，失败后会显示简化的错误信息。检查 API Key 是否有效，配额是否充足。
 
 ### Q: 白名单用户有什么特权？
-A: 白名单用户不受每日免费次数限制，在 Vertex 渠道可使用 4K 分辨率（普通用户限制 1K）。机器人管理员（AstrBot 全局管理员）会自动享有上述白名单特权，无需手动添加自己的 QQ 到白名单。
+A: 白名单用户不受每日免费次数限制，在 Vertex 渠道可使用 4K 分辨率（普通用户限制 1K）。Gemini/OpenAI 渠道所有用户均可指定 1K/2K/4K。机器人管理员（AstrBot 全局管理员）会自动享有上述白名单特权，无需手动添加自己的 QQ 到白名单。
 
 ### Q: 如何获取用户头像作为参考图？
 A: 在命令中 @ 用户即可，如：`/生图 手办化 @用户A`

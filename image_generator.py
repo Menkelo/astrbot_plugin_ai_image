@@ -50,6 +50,15 @@ class AIImageGenerator:
         "9:21": (9, 21),
     }
 
+    # 分辨率档位对应的目标长边（像素）。
+    # 用于提供商原生不支持 imageSize 参数时，生成后按目标长边提升尺寸，
+    # 保证配置面板/指令指定的 1K/2K/4K 始终生效。
+    RESOLUTION_LONG_EDGE: dict[str, int] = {
+        "1K": 1024,
+        "2K": 2048,
+        "4K": 4096,
+    }
+
     # 这些 HTTP 状态码属于请求本身的问题（参数/鉴权/内容策略等），
     # 重试同样的请求不会成功，遇到时直接停止重试以节省超时等待。
     NON_RETRYABLE_CODES: frozenset[str] = frozenset(
@@ -770,6 +779,59 @@ class AIImageGenerator:
         except Exception:
             return None
 
+    def _sync_enforce_resolution(
+        self,
+        image_data: bytes,
+        target_long_edge: int,
+    ) -> bytes:
+        """将图片放大到目标长边（保持比例）。仅当当前长边低于目标时才缩放。"""
+        try:
+            img = ImageOps.exif_transpose(Image.open(BytesIO(image_data)))
+            w, h = img.size
+            long_edge = max(w, h)
+
+            if long_edge < 1 or long_edge >= target_long_edge:
+                return image_data
+
+            scale = target_long_edge / long_edge
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+            output = BytesIO()
+            img.save(output, format="JPEG", quality=95)
+            return output.getvalue()
+        except Exception:
+            return image_data
+
+    async def _enforce_resolution(
+        self,
+        images: list[bytes],
+        image_size: str | None,
+    ) -> list[bytes]:
+        """按目标分辨率档位提升生成图片尺寸，保证 1K/2K/4K 生效。"""
+        if not images:
+            return images
+
+        target = self.RESOLUTION_LONG_EDGE.get((image_size or "1K").strip().upper())
+        if not target:
+            return images
+
+        enforced: list[bytes] = []
+        for b in images:
+            nb = await asyncio.to_thread(
+                self._sync_enforce_resolution,
+                b,
+                target,
+            )
+            enforced.append(nb)
+
+        return enforced
+
     def _build_openai_size(
         self,
         image_size: str | None,
@@ -900,6 +962,14 @@ class AIImageGenerator:
                 c_data, c_mime = await self._convert_image_format(img_data, mime_type)
                 converted_images.append((c_data, c_mime))
 
+        # 图生图智能比例识别：未显式指定比例时，根据第一张参考图推断比例。
+        # 对所有提供商统一生效（原先仅 OpenAI images 路由会推断）。
+        if not aspect_ratio and converted_images:
+            inferred = self._infer_ratio_from_images(converted_images)
+            if inferred:
+                aspect_ratio = inferred
+                logger.info(f"{prefix}未指定比例，根据参考图推断: {aspect_ratio}")
+
         retry_queue: list[ProviderConfig] = [self.main_config] * self.max_retries
         last_error_short = "API 请求失败"
 
@@ -942,6 +1012,8 @@ class AIImageGenerator:
                             aspect_ratio,
                             mode="crop",
                         )
+                    # 分辨率落地：模型未按 imageSize 达到目标时，放大到目标长边
+                    images = await self._enforce_resolution(images, image_size)
                     images = await self._normalize_images_orientation(images)
                     return images, None
 
@@ -1047,7 +1119,7 @@ class AIImageGenerator:
             if not final_ratio and images_data:
                 final_ratio = self._infer_ratio_from_images(images_data)
 
-            size = self._build_openai_size(image_size, final_ratio) if final_ratio else None
+            size = self._build_openai_size(image_size, final_ratio)
 
             logger.info(
                 f"OpenAI images route: aspect_ratio={aspect_ratio}, "

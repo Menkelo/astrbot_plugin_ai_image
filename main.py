@@ -755,6 +755,7 @@ class Gemini_Images(Star):
                     if preset_val:
                         matched_preset_name = key
                         json_ratio = None
+                        json_resolution = None
 
                         try:
                             if isinstance(preset_val, str) and preset_val.strip().startswith("{"):
@@ -762,6 +763,7 @@ class Gemini_Images(Star):
                                 if isinstance(preset_data, dict):
                                     raw_preset_text = preset_data.get("prompt", "")
                                     json_ratio = preset_data.get("aspect_ratio")
+                                    json_resolution = preset_data.get("resolution")
                                 else:
                                     raw_preset_text = str(preset_val)
                             else:
@@ -771,6 +773,8 @@ class Gemini_Images(Star):
 
                         if json_ratio:
                             raw_preset_text += f" {json_ratio}"
+                        if json_resolution:
+                            raw_preset_text += f" {json_resolution}"
 
                         if prompt_lower != key_lower:
                             raw_extra_text = full_text[len(key):].strip()
@@ -817,9 +821,7 @@ class Gemini_Images(Star):
 
         msg += f" [模型: {provider.model}]"
 
-        # 仅 Vertex 渠道显示分辨率/画质提示
-        if provider.api_type == "vertex":
-            msg += f" [分辨率: {final_resolution}]"
+        msg += f" [分辨率: {final_resolution}]"
 
         return msg
 
@@ -888,11 +890,13 @@ class Gemini_Images(Star):
         clean_extra_text, extra_ratio = self._extract_ratio(raw_extra_text)
         final_ratio = extra_ratio if extra_ratio else preset_ratio
 
-        if provider.api_type == "vertex":
-            clean_extra_text, extra_res = self._extract_resolution_keyword(clean_extra_text)
-            clean_preset_text, preset_res = self._extract_resolution_keyword(clean_preset_text)
-            requested_res = extra_res or preset_res
+        # 分辨率关键词（1K/2K/4K）对所有提供商统一解析，
+        # 不再局限于 Vertex 渠道（原生 imageSize + 生成后落地保证生效）。
+        clean_extra_text, extra_res = self._extract_resolution_keyword(clean_extra_text)
+        clean_preset_text, preset_res = self._extract_resolution_keyword(clean_preset_text)
+        requested_res = extra_res or preset_res
 
+        if provider.api_type == "vertex":
             final_resolution = self._resolve_resolution_by_acl(
                 user_id=user_id,
                 group_id=group_id,
@@ -901,7 +905,10 @@ class Gemini_Images(Star):
                 is_admin=is_admin,
             )
         else:
-            final_resolution = self._normalize_config_resolution(slot.default_resolution)
+            # 指令关键词优先，其次配置面板默认分辨率，最后回退 1K
+            final_resolution = self._normalize_config_resolution(
+                requested_res or slot.default_resolution
+            )
 
         if matched_preset_name:
             final_prompt = (
