@@ -1190,17 +1190,18 @@ class Gemini_Images(Star):
             if reply_id:
                 components.append(Comp.Reply(id=reply_id))
 
-            # 诊断：反馈实际输出尺寸，便于确认 2K/4K 是否真正落地
+            # 诊断：反馈实际输出尺寸与文件大小，便于确认 2K/4K 与 PNG 输出是否落地
             actual_label = ""
             try:
                 from PIL import Image as PILImage
 
                 with PILImage.open(BytesIO(results[0])) as im:
-                    actual_label = f"{im.width}x{im.height}"
+                    size_mb = len(results[0]) / (1024 * 1024)
+                    actual_label = f"{im.width}x{im.height} ({size_mb:.1f}MB)"
             except Exception:
                 pass
             if actual_label:
-                logger.info(f"任务完成 [{task_id}] - 实际输出尺寸: {actual_label}")
+                logger.info(f"任务完成 [{task_id}] - 实际输出: {actual_label}")
 
             for img_bytes in results:
                 try:

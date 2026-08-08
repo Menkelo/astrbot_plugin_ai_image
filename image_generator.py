@@ -1034,6 +1034,37 @@ class AIImageGenerator:
             normalized.append(nb)
         return normalized
 
+    @staticmethod
+    def _sync_to_png(image_data: bytes) -> bytes:
+        """将图片统一转为无损 PNG。已是 PNG 时原样返回。"""
+        try:
+            img = Image.open(BytesIO(image_data))
+            if (img.format or "").upper() == "PNG":
+                return image_data
+
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ("P", "LA"):
+                img = img.convert("RGBA")
+            elif img.mode != "RGBA":
+                img = img.convert("RGB")
+
+            output = BytesIO()
+            img.save(output, format="PNG")
+            return output.getvalue()
+        except Exception:
+            return image_data
+
+    async def _ensure_png(self, images: list[bytes]) -> list[bytes]:
+        """统一所有渠道输出为 PNG（无损大文件），避免 JPEG 有损压缩导致文件偏小。"""
+        if not images:
+            return images
+
+        converted: list[bytes] = []
+        for b in images:
+            nb = await asyncio.to_thread(self._sync_to_png, b)
+            converted.append(nb)
+        return converted
+
     async def generate_image(
         self,
         prompt: str,
@@ -1112,6 +1143,7 @@ class AIImageGenerator:
                         aspect_ratio,
                     )
                     images = await self._normalize_images_orientation(images)
+                    images = await self._ensure_png(images)
                     return images, None
 
                 last_error_short = self._short_api_error(error)
