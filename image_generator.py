@@ -1443,6 +1443,11 @@ class AIImageGenerator:
                 prompt, aspect_ratio, images_data
             )
 
+            logger.info(
+                f"Gemini route: aspect_ratio={aspect_ratio}, "
+                f"image_size={image_size}, refs={len(images_data)}"
+            )
+
             payload = await asyncio.to_thread(
                 self._build_gemini_payload,
                 final_prompt,
