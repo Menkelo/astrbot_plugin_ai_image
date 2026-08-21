@@ -1316,7 +1316,6 @@ class AIImageGenerator:
                 form = aiohttp.FormData()
                 form.add_field("model", config.model)
                 form.add_field("prompt", prompt)
-                form.add_field("response_format", "b64_json")
 
                 if include_size and size:
                     form.add_field("size", size)
