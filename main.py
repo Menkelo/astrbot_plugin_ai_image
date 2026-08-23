@@ -7,7 +7,7 @@ import os
 import re
 import time
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Coroutine
 from typing import Any, Tuple, Optional, List
 
@@ -34,13 +34,20 @@ class SlotConfig:
 
 
 class Gemini_Images(Star):
-    """AI 图像生成插件（3提供商槽位 + Vertex 手动双指令双模型）"""
+    """AI 图像生成插件（提供商槽位 + Vertex/Gemini 手动双指令双模型）"""
 
     # 静态命令集合（与下方 @filter.command 装饰器一一对应），
     # 用于动态命令入口去重，提为类常量避免每条消息都重建。
     _STATIC_COMMANDS = frozenset(
-        {"生图", "gpt", "flow", "vertex图", "vertex图2", "gemini图", "gemini图2"}
+        {"生图", "gpt", "flow", "vertex图", "vertex图2", "gemini图", "gemini图2", "gemini模型"}
     )
+
+    # Gemini 手动槽位自动选型：优先匹配关键字与 ListModels 获取失败时的回退模型
+    _GEMINI_SLOT_MODEL_PREFER = {"gemini_manual_1": "flash", "gemini_manual_2": "pro"}
+    _GEMINI_SLOT_MODEL_FALLBACK = {
+        "gemini_manual_1": "gemini-3.1-flash-image",
+        "gemini_manual_2": "gemini-3-pro-image",
+    }
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -58,6 +65,10 @@ class Gemini_Images(Star):
 
         # Gemini 手动配置多 Key 跨请求轮换游标（与 Vertex 同机制）
         self._gemini_key_cursor = 0
+
+        # Gemini 自动选型缓存：ListModels 结果（base_url -> 模型列表）与槽位已解析模型
+        self._gemini_models_cache: dict[str, list[str]] = {}
+        self._gemini_resolved_models: dict[str, str] = {}
 
         self._quota_lock = asyncio.Lock()
         self._quota_file = self._resolve_quota_file()
@@ -200,7 +211,7 @@ class Gemini_Images(Star):
             g1.get("command") or "gemini图"
         ).strip().lstrip("/")
         self.gemini_1_model = (
-            g1.get("model") or "gemini-3.1-flash-image"
+            g1.get("model") or "auto"
         ).strip()
         self.gemini_1_default_resolution = (
             g1.get("default_resolution") or "1K"
@@ -210,7 +221,7 @@ class Gemini_Images(Star):
             g2.get("command") or "gemini图2"
         ).strip().lstrip("/")
         self.gemini_2_model = (
-            g2.get("model") or "gemini-3-pro-image"
+            g2.get("model") or "auto"
         ).strip()
         self.gemini_2_default_resolution = (
             g2.get("default_resolution") or "1K"
@@ -255,12 +266,8 @@ class Gemini_Images(Star):
         )
 
         p1 = api_config.get("provider_1", {}) or {}
-        p2 = api_config.get("provider_2", {}) or {}
-        p3 = api_config.get("provider_3", {}) or {}
 
         p1_id = self._extract_provider_id(p1.get("id")) or legacy_main
-        p2_id = self._extract_provider_id(p2.get("id"))
-        p3_id = self._extract_provider_id(p3.get("id"))
 
         self.slots: list[SlotConfig] = [
             SlotConfig(
@@ -270,22 +277,6 @@ class Gemini_Images(Star):
                 provider=self._parse_provider(p1_id),
                 default_resolution=(p1.get("default_resolution", "1K") or "1K").strip(),
                 default_aspect_ratio=(p1.get("default_aspect_ratio", "自动") or "自动").strip(),
-            ),
-            SlotConfig(
-                slot_name="provider_2",
-                command=(p2.get("command", "动漫图") or "动漫图").strip().lstrip("/"),
-                provider_id=p2_id,
-                provider=self._parse_provider(p2_id),
-                default_resolution=(p2.get("default_resolution", "1K") or "1K").strip(),
-                default_aspect_ratio=(p2.get("default_aspect_ratio", "自动") or "自动").strip(),
-            ),
-            SlotConfig(
-                slot_name="provider_3",
-                command=(p3.get("command", "海报图") or "海报图").strip().lstrip("/"),
-                provider_id=p3_id,
-                provider=self._parse_provider(p3_id),
-                default_resolution=(p3.get("default_resolution", "1K") or "1K").strip(),
-                default_aspect_ratio=(p3.get("default_aspect_ratio", "自动") or "自动").strip(),
             ),
         ]
 
@@ -483,6 +474,126 @@ class Gemini_Images(Star):
             pass
 
         return None
+
+    # =========================
+    # Gemini Auto Model
+    # =========================
+
+    @staticmethod
+    def _pick_gemini_model(models: list[str], prefer: str) -> str:
+        """从模型列表挑选：优先匹配偏好关键字（flash/pro），否则取第一个。"""
+        if not models:
+            return ""
+        if prefer:
+            for m in models:
+                if prefer in m.lower():
+                    return m
+        return models[0]
+
+    async def _fetch_gemini_image_models(
+        self, provider: ProviderConfig
+    ) -> list[str] | None:
+        """调用 Gemini ListModels 接口拉取支持 generateContent 的生图模型。
+
+        兼容官方地址与中转站（Bearer 鉴权）；失败返回 None，由调用方决定回退。
+        """
+        base = provider.base_url.rstrip("/")
+        prefix = "" if base.endswith("/v1beta") else "/v1beta"
+
+        keys = [k for k in (provider.gemini_keys or []) if k]
+        if not keys and provider.api_key:
+            keys = [provider.api_key]
+        if not keys:
+            return None
+
+        api_key = keys[self._gemini_key_cursor % len(keys)]
+        self._gemini_key_cursor += 1
+
+        headers = {"x-goog-api-key": api_key}
+        if (
+            "generativelanguage.googleapis.com" not in base
+            and "aiplatform.googleapis.com" not in base
+        ):
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        url = f"{base}{prefix}/models"
+        session = self._get_http_session()
+        models: list[str] = []
+
+        try:
+            page_token = ""
+            for _ in range(5):
+                params = {"pageSize": 1000}
+                if page_token:
+                    params["pageToken"] = page_token
+
+                async with session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.warning(
+                            f"获取模型列表失败 API {resp.status}: {body[:200]}"
+                        )
+                        return None
+                    data = await resp.json(content_type=None)
+
+                for m in (data or {}).get("models", []) or []:
+                    if not isinstance(m, dict):
+                        continue
+                    name = str(m.get("name") or "").strip()
+                    if not name:
+                        continue
+                    methods = m.get("supportedGenerationMethods")
+                    if isinstance(methods, list) and "generateContent" not in methods:
+                        continue
+                    short = name.removeprefix("models/").strip()
+                    if short and "image" in short.lower():
+                        models.append(short)
+
+                page_token = str((data or {}).get("nextPageToken") or "")
+                if not page_token:
+                    break
+        except Exception as e:
+            logger.warning(f"获取模型列表异常: {e}")
+            return None
+
+        return sorted(set(models))
+
+    async def _resolve_gemini_auto_model(
+        self, slot: SlotConfig, provider: ProviderConfig
+    ) -> ProviderConfig | None:
+        """model 留空/auto 时自动选型：拉取生图模型，按槽位偏好挑选并缓存。"""
+        resolved = self._gemini_resolved_models.get(slot.slot_name)
+        if resolved:
+            return replace(provider, model=resolved)
+
+        cache_key = provider.base_url.rstrip("/")
+        models = self._gemini_models_cache.get(cache_key)
+        if models is None:
+            models = await self._fetch_gemini_image_models(provider) or []
+            if models:
+                self._gemini_models_cache[cache_key] = models
+
+        model = self._pick_gemini_model(
+            models, self._GEMINI_SLOT_MODEL_PREFER.get(slot.slot_name, "")
+        )
+
+        if not model:
+            model = self._GEMINI_SLOT_MODEL_FALLBACK.get(slot.slot_name, "")
+            if not model:
+                return None
+            logger.warning(f"[{slot.slot_name}] 自动获取模型失败，回退默认模型 {model}")
+
+        self._gemini_resolved_models[slot.slot_name] = model
+        logger.info(
+            f"[{slot.slot_name}] 自动选择模型: {model}"
+            f"（可用: {', '.join(models) if models else '获取失败'}）"
+        )
+        return replace(provider, model=model)
 
     # =========================
     # Permission / Quota
@@ -796,6 +907,60 @@ class Gemini_Images(Star):
         async for x in self._dispatch_generate(event):
             yield x
 
+    @filter.command("gemini模型")
+    async def cmd_list_gemini_models(self, event: AstrMessageEvent):
+        """查看 Gemini 手动渠道可用生图模型并刷新自动选型（仅管理员）。"""
+        if not self._is_event_admin(event):
+            if not self.perm_silent:
+                yield event.plain_result(self.perm_no_permission_reply)
+            return
+
+        if not self.gemini_manual_enabled:
+            yield event.plain_result(
+                "❌ 未启用 Gemini 手动配置（gemini_manual_config.enabled）。"
+            )
+            return
+
+        slot = next(
+            (s for s in self.slots if s.slot_name == "gemini_manual_1" and s.provider),
+            None,
+        )
+        if not slot:
+            yield event.plain_result("❌ Gemini 手动配置未解析到可用提供商。")
+            return
+
+        # 强制刷新缓存后重新拉取
+        self._gemini_models_cache.clear()
+        self._gemini_resolved_models.clear()
+        models = await self._fetch_gemini_image_models(slot.provider) or []
+
+        if not models:
+            yield event.plain_result(
+                "❌ 获取模型列表失败（接口可能不支持 ListModels），"
+                "生图时将回退默认模型：\n"
+                f"- gemini图: {self._GEMINI_SLOT_MODEL_FALLBACK['gemini_manual_1']}\n"
+                f"- gemini图2: {self._GEMINI_SLOT_MODEL_FALLBACK['gemini_manual_2']}"
+            )
+            return
+
+        lines = ["🤖 Gemini 可用生图模型："]
+        lines.extend(f"- {m}" for m in models)
+
+        for s in self.slots:
+            if s.slot_name not in self._GEMINI_SLOT_MODEL_PREFER or not s.provider:
+                continue
+            configured = (s.provider.model or "").strip()
+            if configured.lower() in ("", "auto"):
+                pick = self._pick_gemini_model(
+                    models, self._GEMINI_SLOT_MODEL_PREFER[s.slot_name]
+                ) or self._GEMINI_SLOT_MODEL_FALLBACK.get(s.slot_name, "")
+                self._gemini_resolved_models[s.slot_name] = pick
+                lines.append(f"\n/{s.command} → {pick}（自动）")
+            else:
+                lines.append(f"\n/{s.command} → {configured}（手动）")
+
+        yield event.plain_result("\n".join(lines))
+
     @filter.regex(r"^/?[^\s]+")
     async def entry_dynamic_commands(self, event: AstrMessageEvent):
         """
@@ -957,6 +1122,17 @@ class Gemini_Images(Star):
         if not provider:
             yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
             return
+
+        # Gemini 渠道 model 留空/auto 时，从 ListModels 自动选型
+        if provider.api_type == "gemini" and (
+            (provider.model or "").strip().lower() in ("", "auto")
+        ):
+            provider = await self._resolve_gemini_auto_model(slot, provider)
+            if not provider:
+                yield event.plain_result(
+                    "❌ 自动获取模型失败，请在配置面板手动填写模型名。"
+                )
+                return
 
         ok, remain = await self._check_and_consume_quota(user_id, group_id, is_admin)
         if not ok:

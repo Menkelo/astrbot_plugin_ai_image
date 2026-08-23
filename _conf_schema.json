@@ -1,10 +1,10 @@
 {
   "api_config": {
-    "description": "提供商配置",
+    "description": "提供商配置（单槽位）",
     "type": "object",
     "items": {
       "provider_1": {
-        "description": "提供商1（默认）",
+        "description": "提供商（默认）",
         "type": "object",
         "items": {
           "id": {
@@ -19,70 +19,6 @@
             "hint": "建议保持默认: 生图",
             "type": "string",
             "default": "生图"
-          },
-          "default_resolution": {
-            "description": "默认分辨率",
-            "type": "string",
-            "default": "1K",
-            "options": ["1K", "2K", "4K"]
-          },
-          "default_aspect_ratio": {
-            "description": "默认比例",
-            "hint": "自动: 不指定（图生图时按参考图比例）",
-            "type": "string",
-            "default": "自动",
-            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
-          }
-        }
-      },
-      "provider_2": {
-        "description": "提供商2",
-        "type": "object",
-        "items": {
-          "id": {
-            "description": "提供商ID",
-            "hint": "系统提供商选择",
-            "type": "string",
-            "default": "",
-            "_special": "select_provider"
-          },
-          "command": {
-            "description": "触发命令",
-            "hint": "建议默认: 动漫图",
-            "type": "string",
-            "default": "动漫图"
-          },
-          "default_resolution": {
-            "description": "默认分辨率",
-            "type": "string",
-            "default": "1K",
-            "options": ["1K", "2K", "4K"]
-          },
-          "default_aspect_ratio": {
-            "description": "默认比例",
-            "hint": "自动: 不指定（图生图时按参考图比例）",
-            "type": "string",
-            "default": "自动",
-            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
-          }
-        }
-      },
-      "provider_3": {
-        "description": "提供商3",
-        "type": "object",
-        "items": {
-          "id": {
-            "description": "提供商ID",
-            "hint": "系统提供商选择",
-            "type": "string",
-            "default": "",
-            "_special": "select_provider"
-          },
-          "command": {
-            "description": "触发命令",
-            "hint": "建议默认: 海报图",
-            "type": "string",
-            "default": "海报图"
           },
           "default_resolution": {
             "description": "默认分辨率",
@@ -216,9 +152,9 @@
           },
           "model": {
             "description": "模型ID",
-            "hint": "例如 gemini-3.1-flash-image",
+            "hint": "留空或 auto: 自动从接口获取并优先选择 flash 系生图模型",
             "type": "string",
-            "default": "gemini-3.1-flash-image"
+            "default": "auto"
           },
           "default_resolution": {
             "description": "默认分辨率",
@@ -240,9 +176,9 @@
           },
           "model": {
             "description": "模型ID",
-            "hint": "例如 gemini-3-pro-image",
+            "hint": "留空或 auto: 自动从接口获取并优先选择 pro 系生图模型",
             "type": "string",
-            "default": "gemini-3-pro-image"
+            "default": "auto"
           },
           "default_resolution": {
             "description": "默认分辨率",

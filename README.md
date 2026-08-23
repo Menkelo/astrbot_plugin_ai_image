@@ -1,6 +1,6 @@
 # AI 绘图聚合插件
 
-多模型 AI 图像生成插件，支持 Gemini/OpenAI/Vertex AI 三种 API 类型，提供灵活的 3 槽位命令绑定，支持文生图、图生图及智能参考图识别。
+多模型 AI 图像生成插件，支持 Gemini/OpenAI/Vertex AI 三种 API 类型，提供灵活的槽位命令绑定，支持文生图、图生图及智能参考图识别。
 
 ## 快速开始
 
@@ -18,10 +18,6 @@
   - 支持内嵌比例指定，如：`/生图 风景画 16:9` 或 `/生图 人物肖像 竖屏`
   - 支持分辨率指定（Vertex 渠道），如：`/生图 高清壁纸 4K`
 
-- `/动漫图`、`/海报图` (可自定义命令名称)
-  - 3 个提供商槽位，可分别绑定不同提供商和模型，使用不同的命令触发。
-  - 用法与 `/生图` 相同。
-
 - `/vertex图`、`/vertex图2` (需手动启用)
   - Vertex AI 手动配置模式，独立于系统提供商。
   - 支持双指令双模型配置，适合高级用户。
@@ -29,11 +25,16 @@
 - `/gemini图`、`/gemini图2` (需手动启用)
   - Gemini 手动配置模式，独立于系统提供商，支持官方接口与 `Authorization: Bearer` 鉴权的 Gemini 兼容中转（如 `https://meinianda.top/v1beta`）。
   - 支持双指令双模型配置与多 Key 自动轮询。
+  - **模型自动获取**：模型留空或填 `auto` 时自动从中转接口拉取模型列表并选型（`gemini图` 优先 flash 系、`gemini图2` 优先 pro 系），无需手动填写模型名。
+
+- `/gemini模型` (管理员)
+  - 查看接口返回的可用生图模型列表，并刷新两个槽位的自动选型结果。
 
 ### 功能特性
 
 - ✅ **多提供商支持**：支持 Gemini/OpenAI/Vertex AI 三种 API 类型，自动识别。
-- ✅ **3 槽位命令绑定**：3 个独立提供商槽位，可分别配置不同模型和命令（如 `/生图`、`/动漫图`、`/海报图`）。
+- ✅ **槽位命令绑定**：提供商槽位可自定义触发命令（默认 `/生图`）。
+- ✅ **模型自动获取**（Gemini 手动渠道）：模型留空或 `auto` 时自动调用 ListModels 接口拉取生图模型并按槽位选型（flash/pro），获取失败回退默认模型，`/gemini模型` 可随时查看与刷新。
 - ✅ **Vertex AI 双模型**：可选手动配置 Vertex AI，支持双指令双模型独立运行（`/vertex图`、`/vertex图2`）。
 - ✅ **Gemini 手动双模型**：可选手动配置 Gemini `generateContent` 接口（官方或 Bearer 鉴权中转），支持双指令双模型（`/gemini图`、`/gemini图2`）与多 Key 轮询；中转站不识别可选 `generationConfig` 时自动降级重试，比例/分辨率本地兜底。
 - ✅ **文生图**：根据文字描述生成图片。
@@ -50,25 +51,15 @@
 
 ### 配置项
 
-#### api_config（提供商配置）
+#### api_config（提供商配置，单槽位）
 
 | 子配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| **provider_1** | object | - | 提供商槽位 1（默认命令 `/生图`） |
+| **provider_1** | object | - | 提供商槽位（默认命令 `/生图`） |
 | `provider_1.id` | string | `””` | 系统提供商 ID 选择 |
 | `provider_1.command` | string | `”生图”` | 触发命令名称 |
 | `provider_1.default_resolution` | string | `”1K”` | 默认分辨率<br>可选：`1K`、`2K`、`4K` |
 | `provider_1.default_aspect_ratio` | string | `”自动”` | 默认比例<br>可选：`自动`、`1:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`<br>`自动`：不指定（图生图时按参考图比例） |
-| **provider_2** | object | - | 提供商槽位 2（默认命令 `/动漫图`） |
-| `provider_2.id` | string | `””` | 系统提供商 ID 选择 |
-| `provider_2.command` | string | `”动漫图”` | 触发命令名称 |
-| `provider_2.default_resolution` | string | `”1K”` | 默认分辨率 |
-| `provider_2.default_aspect_ratio` | string | `”自动”` | 默认比例（同上） |
-| **provider_3** | object | - | 提供商槽位 3（默认命令 `/海报图`） |
-| `provider_3.id` | string | `””` | 系统提供商 ID 选择 |
-| `provider_3.command` | string | `”海报图”` | 触发命令名称 |
-| `provider_3.default_resolution` | string | `”1K”` | 默认分辨率 |
-| `provider_3.default_aspect_ratio` | string | `”自动”` | 默认比例（同上） |
 
 #### vertex_manual_config（Vertex AI 手动配置）
 
@@ -99,11 +90,11 @@
 | `keys` | list | `[]` | Gemini Keys 列表<br>格式：`[“API_KEY”, ...]`（Bearer 鉴权，多 Key 自动轮询） |
 | **gemini_1** | object | - | Gemini 模型槽位 1 |
 | `gemini_1.command` | string | `”gemini图”` | 触发命令名称 |
-| `gemini_1.model` | string | `”gemini-3.1-flash-image”` | 模型 ID |
+| `gemini_1.model` | string | `”auto”` | 模型 ID<br>留空或 `”auto”`：自动从接口获取，优先选择 flash 系生图模型 |
 | `gemini_1.default_resolution` | string | `”1K”` | 默认分辨率（1K/2K/4K） |
 | **gemini_2** | object | - | Gemini 模型槽位 2 |
 | `gemini_2.command` | string | `”gemini图2”` | 触发命令名称 |
-| `gemini_2.model` | string | `”gemini-3-pro-image”` | 模型 ID |
+| `gemini_2.model` | string | `”auto”` | 模型 ID<br>留空或 `”auto”`：自动从接口获取，优先选择 pro 系生图模型 |
 | `gemini_2.default_resolution` | string | `”1K”` | 默认分辨率（1K/2K/4K） |
 
 > 请求走 `POST {base_url}/models/{model}:generateContent`，携带 `Authorization: Bearer {API Key}`（官方域名使用 `x-goog-api-key`）；`contents[].parts[]` 传提示词与参考图，响应从 `candidates[].content.parts[].inlineData` 提取 Base64 图片。
@@ -182,10 +173,11 @@
 /生图 像素艺术风格 @用户A @用户B
 ```
 
-#### 多槽位命令
+#### 手动渠道命令
 ```
-/动漫图 少女，粉色头发       # 使用 provider_2
-/海报图 科幻电影海报 16:9     # 使用 provider_3
+/gemini图 少女，粉色头发       # Gemini 手动模型1（自动选型，优先 flash 系）
+/gemini图2 科幻电影海报 16:9   # Gemini 手动模型2（自动选型，优先 pro 系）
+/vertex图 高清壁纸 4K          # Vertex 手动模型1
 ```
 
 #### 预设管理（使用 AstrBot 全局预设系统）
@@ -213,7 +205,7 @@
 A: 支持所有兼容 Gemini/OpenAI/Vertex AI 接口的模型，插件会自动识别 API 类型。
 
 ### Q: 如何配置多个模型？
-A: 使用 3 个提供商槽位分别绑定不同模型，或启用 Vertex 手动配置使用双模型。
+A: 启用 Gemini 或 Vertex 手动配置即可使用双指令双模型；Gemini 渠道模型可留空（`auto`）自动获取，无需手动填写。也可在提供商槽位绑定系统提供商使用其模型。
 
 ### Q: 生成失败怎么办？
 A: 插件内置 3 次自动重试，失败后会显示简化的错误信息。检查 API Key 是否有效，配额是否充足。

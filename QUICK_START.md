@@ -53,8 +53,8 @@
 1. 启用 `gemini_manual_config.enabled`
 2. `base_url` 填官方地址或中转地址（以 `/v1beta` 结尾）
 3. 填写 `keys` 列表，格式：`API_KEY`（多 Key 自动轮询）
-4. 配置两个模型槽位的命令和模型名
-5. 发送 `/gemini图 测试图片` 试试
+4. 模型可留空（`auto`）：自动从接口获取生图模型，`gemini图` 优先 flash 系、`gemini图2` 优先 pro 系；也可手动填写模型名
+5. 发送 `/gemini图 测试图片` 试试；`/gemini模型`（管理员）可查看可用模型列表并刷新选型
 
 ### 示例配置：
 
@@ -69,12 +69,12 @@
     ],
     "gemini_1": {
       "command": "gemini图",
-      "model": "gemini-3.1-flash-image",
+      "model": "auto",
       "default_resolution": "1K"
     },
     "gemini_2": {
       "command": "gemini图2",
-      "model": "gemini-3-pro-image",
+      "model": "auto",
       "default_resolution": "2K"
     }
   }
@@ -134,8 +134,9 @@
 | `/生图 <提示词> @用户` | 使用头像 |
 | `/vertex图 <提示词>` | Vertex 手动模型1（需启用） |
 | `/vertex图2 <提示词>` | Vertex 手动模型2（需启用） |
-| `/gemini图 <提示词>` | Gemini 手动模型1（需启用） |
-| `/gemini图2 <提示词>` | Gemini 手动模型2（需启用） |
+| `/gemini图 <提示词>` | Gemini 手动模型1（需启用，模型可自动获取） |
+| `/gemini图2 <提示词>` | Gemini 手动模型2（需启用，模型可自动获取） |
+| `/gemini模型` | 查看 Gemini 可用模型并刷新选型（管理员） |
 
 ## 支持的比例
 
@@ -143,7 +144,7 @@
 
 或使用关键词：`横屏`/`横版`/`landscape` → 16:9，`竖屏`/`竖版`/`portrait` → 9:16
 
-> 可在插件配置面板为每个提供商槽位（provider_1/2/3）设置 `default_aspect_ratio` 默认比例；指令内嵌比例（如 `/生图 风景 16:9`）优先于默认比例。
+> 可在插件配置面板为提供商槽位（provider_1）设置 `default_aspect_ratio` 默认比例；指令内嵌比例（如 `/生图 风景 16:9`）优先于默认比例。
 
 ## 支持的分辨率
 
