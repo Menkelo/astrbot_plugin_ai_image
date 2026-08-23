@@ -152,7 +152,7 @@
           },
           "model": {
             "description": "模型ID",
-            "hint": "留空或 auto: 自动从接口获取并优先选择 flash 系生图模型",
+            "hint": "留空或 auto: 自动选型（优先 flash 系）；启用后配置页自动填充下拉选项",
             "type": "string",
             "default": "auto"
           },
@@ -176,7 +176,7 @@
           },
           "model": {
             "description": "模型ID",
-            "hint": "留空或 auto: 自动从接口获取并优先选择 pro 系生图模型",
+            "hint": "留空或 auto: 自动选型（优先 pro 系）；启用后配置页自动填充下拉选项",
             "type": "string",
             "default": "auto"
           },

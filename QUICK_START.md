@@ -53,8 +53,8 @@
 1. 启用 `gemini_manual_config.enabled`
 2. `base_url` 填官方地址或中转地址（以 `/v1beta` 结尾）
 3. 填写 `keys` 列表，格式：`API_KEY`（多 Key 自动轮询）
-4. 模型可留空（`auto`）：自动从接口获取生图模型，`gemini图` 优先 flash 系、`gemini图2` 优先 pro 系；也可手动填写模型名
-5. 发送 `/gemini图 测试图片` 试试；`/gemini模型`（管理员）可查看可用模型列表并刷新选型
+4. 模型可留空（`auto`）：自动从接口获取生图模型，`gemini图` 优先 flash 系、`gemini图2` 优先 pro 系；插件加载后配置页的模型项也会自动变为下拉列表，可直接选择
+5. 发送 `/gemini图 测试图片` 试试
 
 ### 示例配置：
 
@@ -136,7 +136,6 @@
 | `/vertex图2 <提示词>` | Vertex 手动模型2（需启用） |
 | `/gemini图 <提示词>` | Gemini 手动模型1（需启用，模型可自动获取） |
 | `/gemini图2 <提示词>` | Gemini 手动模型2（需启用，模型可自动获取） |
-| `/gemini模型` | 查看 Gemini 可用模型并刷新选型（管理员） |
 
 ## 支持的比例
 

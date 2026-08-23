@@ -33,6 +33,62 @@ class ProviderConfig:
     gemini_keys: list[str] | None = None
 
 
+def parse_gemini_models_payload(payload: dict) -> list[str]:
+    """解析 /v1beta/models 响应（Gemini 格式 {"models":[{"name":...}]}），
+    过滤出支持 generateContent 的生图模型，去重返回短模型 id 列表。"""
+    ids: list[str] = []
+    try:
+        models = payload.get("models")
+        if isinstance(models, list):
+            for item in models:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                methods = item.get("supportedGenerationMethods")
+                if isinstance(methods, list) and "generateContent" not in methods:
+                    continue
+                mid = name.removeprefix("models/").strip()
+                if mid and "image" in mid.lower() and mid not in ids:
+                    ids.append(mid)
+    except Exception:
+        pass
+    return ids
+
+
+async def fetch_gemini_models(
+    base_url: str, api_key: str, *, timeout_sec: int = 15
+) -> list[str]:
+    """从 Gemini 兼容接口 GET {base_url}/v1beta/models 拉取可用生图模型列表。
+
+    官方地址用 x-goog-api-key，其余中转站同时携带 Bearer。
+    """
+    base = (base_url or "").strip().rstrip("/")
+    prefix = "" if base.endswith("/v1beta") else "/v1beta"
+    endpoint = f"{base}{prefix}/models"
+    headers = {"x-goog-api-key": (api_key or "").strip()}
+    if (
+        "generativelanguage.googleapis.com" not in base
+        and "aiplatform.googleapis.com" not in base
+    ):
+        headers["Authorization"] = f"Bearer {(api_key or '').strip()}"
+
+    timeout = aiohttp.ClientTimeout(total=max(5, timeout_sec))
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(
+            endpoint, params={"pageSize": 1000}, headers=headers
+        ) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise RuntimeError(f"Gemini HTTP {resp.status}: {text[:200]}")
+    try:
+        payload = json.loads(text)
+    except ValueError as e:
+        raise RuntimeError(f"Gemini 模型列表响应非 JSON: {e}") from e
+    return parse_gemini_models_payload(payload)
+
+
 class AIImageGenerator:
     """AI 图像生成器（支持 Gemini/OpenAI/Vertex）"""
 
