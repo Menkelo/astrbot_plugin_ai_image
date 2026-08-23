@@ -26,11 +26,16 @@
   - Vertex AI 手动配置模式，独立于系统提供商。
   - 支持双指令双模型配置，适合高级用户。
 
+- `/gemini图`、`/gemini图2` (需手动启用)
+  - Gemini 手动配置模式，独立于系统提供商，支持官方接口与 `Authorization: Bearer` 鉴权的 Gemini 兼容中转（如 `https://meinianda.top/v1beta`）。
+  - 支持双指令双模型配置与多 Key 自动轮询。
+
 ### 功能特性
 
 - ✅ **多提供商支持**：支持 Gemini/OpenAI/Vertex AI 三种 API 类型，自动识别。
 - ✅ **3 槽位命令绑定**：3 个独立提供商槽位，可分别配置不同模型和命令（如 `/生图`、`/动漫图`、`/海报图`）。
 - ✅ **Vertex AI 双模型**：可选手动配置 Vertex AI，支持双指令双模型独立运行（`/vertex图`、`/vertex图2`）。
+- ✅ **Gemini 手动双模型**：可选手动配置 Gemini `generateContent` 接口（官方或 Bearer 鉴权中转），支持双指令双模型（`/gemini图`、`/gemini图2`）与多 Key 轮询；中转站不识别可选 `generationConfig` 时自动降级重试，比例/分辨率本地兜底。
 - ✅ **文生图**：根据文字描述生成图片。
 - ✅ **图生图**：基于参考图片（支持多张）生成新图片。
 - ✅ **智能参考图**：自动识别消息、引用消息中的图片，以及通过@用户获取其头像作为参考图。
@@ -82,6 +87,26 @@
 | `vertex_2.command` | string | `”vertex图2”` | 触发命令名称 |
 | `vertex_2.model` | string | `”gemini-2.5-flash-image-preview”` | 模型 ID |
 | `vertex_2.default_resolution` | string | `”1K”` | 默认分辨率（1K/2K/4K） |
+
+#### gemini_manual_config（Gemini 手动配置）
+
+支持 Gemini `generateContent` 原生接口（官方地址或 Bearer 鉴权中转均可，如 `https://meinianda.top/v1beta`）。
+
+| 子配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | 启用 Gemini 手动配置（不走系统提供商） |
+| `base_url` | string | `”https://generativelanguage.googleapis.com”` | Gemini API Base URL<br>中转地址以 `/v1beta` 结尾，如 `”https://meinianda.top/v1beta”` |
+| `keys` | list | `[]` | Gemini Keys 列表<br>格式：`[“API_KEY”, ...]`（Bearer 鉴权，多 Key 自动轮询） |
+| **gemini_1** | object | - | Gemini 模型槽位 1 |
+| `gemini_1.command` | string | `”gemini图”` | 触发命令名称 |
+| `gemini_1.model` | string | `”gemini-3.1-flash-image”` | 模型 ID |
+| `gemini_1.default_resolution` | string | `”1K”` | 默认分辨率（1K/2K/4K） |
+| **gemini_2** | object | - | Gemini 模型槽位 2 |
+| `gemini_2.command` | string | `”gemini图2”` | 触发命令名称 |
+| `gemini_2.model` | string | `”gemini-3-pro-image”` | 模型 ID |
+| `gemini_2.default_resolution` | string | `”1K”` | 默认分辨率（1K/2K/4K） |
+
+> 请求走 `POST {base_url}/models/{model}:generateContent`，携带 `Authorization: Bearer {API Key}`（官方域名使用 `x-goog-api-key`）；`contents[].parts[]` 传提示词与参考图，响应从 `candidates[].content.parts[].inlineData` 提取 Base64 图片。
 
 #### generate_config（生图参数）
 

@@ -183,6 +183,77 @@
       }
     }
   },
+  "gemini_manual_config": {
+    "description": "Gemini 手动配置（不走系统提供商，双指令双模型，支持官方/中转接口）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 Gemini 手动配置",
+        "type": "bool",
+        "default": false
+      },
+      "base_url": {
+        "description": "Gemini API Base URL",
+        "hint": "官方或中转地址；中转以 /v1beta 结尾，如 https://meinianda.top/v1beta",
+        "type": "string",
+        "default": "https://generativelanguage.googleapis.com"
+      },
+      "keys": {
+        "description": "Gemini Keys 列表",
+        "type": "list",
+        "default": [],
+        "hint": "每项格式: API_KEY（Bearer 鉴权，多 Key 自动轮询）"
+      },
+      "gemini_1": {
+        "description": "Gemini 模型1",
+        "type": "object",
+        "items": {
+          "command": {
+            "description": "触发命令",
+            "hint": "例如: gemini图",
+            "type": "string",
+            "default": "gemini图"
+          },
+          "model": {
+            "description": "模型ID",
+            "hint": "例如 gemini-3.1-flash-image",
+            "type": "string",
+            "default": "gemini-3.1-flash-image"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      },
+      "gemini_2": {
+        "description": "Gemini 模型2",
+        "type": "object",
+        "items": {
+          "command": {
+            "description": "触发命令",
+            "hint": "例如: gemini图2",
+            "type": "string",
+            "default": "gemini图2"
+          },
+          "model": {
+            "description": "模型ID",
+            "hint": "例如 gemini-3-pro-image",
+            "type": "string",
+            "default": "gemini-3-pro-image"
+          },
+          "default_resolution": {
+            "description": "默认分辨率",
+            "type": "string",
+            "default": "1K",
+            "options": ["1K", "2K", "4K"]
+          }
+        }
+      }
+    }
+  },
   "generate_config": {
     "description": "生图参数",
     "type": "object",

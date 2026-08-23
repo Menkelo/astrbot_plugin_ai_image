@@ -30,6 +30,7 @@ class ProviderConfig:
     api_version: str = "v1beta1"
     location: str = "us-central1"
     vertex_keys: list[str] | None = None
+    gemini_keys: list[str] | None = None
 
 
 class AIImageGenerator:
@@ -132,6 +133,7 @@ class AIImageGenerator:
         max_retries: int = 3,
         retry_delay: float = 1,
         vertex_start_idx: int = 0,
+        gemini_start_idx: int = 0,
     ):
         self.main_config = main_config
         self.timeout = timeout
@@ -142,6 +144,8 @@ class AIImageGenerator:
         self.retry_delay = max(0, float(retry_delay))
         # 由调用方传入起始 Key 索引，实现 Vertex 多 Key 跨请求轮换
         self._vertex_idx = max(0, int(vertex_start_idx))
+        # Gemini 手动配置多 Key 轮换游标（与 Vertex 同机制）
+        self._gemini_idx = max(0, int(gemini_start_idx))
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -248,6 +252,9 @@ class AIImageGenerator:
 
         if "Vertex keys 未配置" in err_str:
             return "Vertex Key 未配置"
+
+        if "Gemini Key 未配置" in err_str:
+            return "Gemini Key 未配置"
 
         return "API 请求失败"
 
@@ -964,6 +971,20 @@ class AIImageGenerator:
 
         return api_key, project_id
 
+    def _next_gemini_key(self, config: ProviderConfig) -> str:
+        """Gemini 手动配置多 Key 轮换：每次调用取下一个 Key 并自增游标。
+
+        未配置多 Key 列表时直接回落到单 api_key。
+        """
+        keys = config.gemini_keys or []
+        if keys:
+            raw = keys[self._gemini_idx % len(keys)]
+            self._gemini_idx += 1
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+
+        return (config.api_key or "").strip()
+
     # =========================
     # Main Generate
     # =========================
@@ -1470,16 +1491,20 @@ class AIImageGenerator:
             else:
                 url = f"{base}/v1beta/models/{config.model}:generateContent"
 
+            api_key = self._next_gemini_key(config)
+            if not api_key:
+                return None, "Gemini Key 未配置"
+
             headers = {
                 "Content-Type": "application/json",
-                "x-goog-api-key": config.api_key,
+                "x-goog-api-key": api_key,
             }
             # 非 Google 官方域名的中转站，同时携带 Bearer 兜底，兼容不识别 x-goog-api-key 的网关
             if (
                 "generativelanguage.googleapis.com" not in base
                 and "aiplatform.googleapis.com" not in base
             ):
-                headers["Authorization"] = f"Bearer {config.api_key}"
+                headers["Authorization"] = f"Bearer {api_key}"
 
             final_prompt = self._augment_prompt_for_ratio(
                 prompt, aspect_ratio, images_data
@@ -1499,12 +1524,25 @@ class AIImageGenerator:
             )
 
             session = self._get_session()
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=self.timeout),
-            ) as response:
+
+            async def _post_gemini(p: dict):
+                return await session.post(
+                    url,
+                    json=p,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout),
+                )
+
+            response = await _post_gemini(payload)
+            if response.status == 400 and "generationConfig" in payload:
+                # generationConfig 为可选字段，部分中转站不识别
+                # imageConfig/responseModalities 等会返回 400，去掉重试一次，
+                # 比例/分辨率由本地后处理（裁剪/长边放大）兜底保证生效
+                response.close()
+                payload.pop("generationConfig", None)
+                response = await _post_gemini(payload)
+
+            async with response:
                 if response.status != 200:
                     body = await response.text()
                     return None, f"API {response.status}: {body[:300]}"

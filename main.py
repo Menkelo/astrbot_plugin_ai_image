@@ -38,7 +38,9 @@ class Gemini_Images(Star):
 
     # 静态命令集合（与下方 @filter.command 装饰器一一对应），
     # 用于动态命令入口去重，提为类常量避免每条消息都重建。
-    _STATIC_COMMANDS = frozenset({"生图", "gpt", "flow", "vertex图", "vertex图2"})
+    _STATIC_COMMANDS = frozenset(
+        {"生图", "gpt", "flow", "vertex图", "vertex图2", "gemini图", "gemini图2"}
+    )
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
@@ -53,6 +55,9 @@ class Gemini_Images(Star):
 
         # Vertex 多 Key 跨请求轮换游标（每个 vertex 请求自增，实现负载分流）
         self._vertex_key_cursor = 0
+
+        # Gemini 手动配置多 Key 跨请求轮换游标（与 Vertex 同机制）
+        self._gemini_key_cursor = 0
 
         self._quota_lock = asyncio.Lock()
         self._quota_file = self._resolve_quota_file()
@@ -143,6 +148,7 @@ class Gemini_Images(Star):
         perm_conf = self.config.get("permission_config", {}) or {}
         quota_conf = self.config.get("quota_config", {}) or {}
         vertex_conf = self.config.get("vertex_manual_config", {}) or {}
+        gemini_conf = self.config.get("gemini_manual_config", {}) or {}
 
         self.timeout = int(gen_config.get("timeout", 180))
         self.max_image_size_mb = int(gen_config.get("max_image_size_mb", 10))
@@ -176,6 +182,39 @@ class Gemini_Images(Star):
             vertex_conf.get("location", "global") or "global"
         ).strip()
         self.vertex_manual_keys = vertex_conf.get("keys", []) or []
+
+        # Gemini manual common config（Gemini generateContent 兼容接口，
+        # 官方或 Bearer 鉴权中转均可）
+        self.gemini_manual_enabled = bool(gemini_conf.get("enabled", False))
+        self.gemini_manual_base_url = (
+            gemini_conf.get("base_url", "https://generativelanguage.googleapis.com")
+            or "https://generativelanguage.googleapis.com"
+        ).strip()
+        self.gemini_manual_keys = gemini_conf.get("keys", []) or []
+
+        # Gemini model slots
+        g1 = gemini_conf.get("gemini_1", {}) or {}
+        g2 = gemini_conf.get("gemini_2", {}) or {}
+
+        self.gemini_1_command = (
+            g1.get("command") or "gemini图"
+        ).strip().lstrip("/")
+        self.gemini_1_model = (
+            g1.get("model") or "gemini-3.1-flash-image"
+        ).strip()
+        self.gemini_1_default_resolution = (
+            g1.get("default_resolution") or "1K"
+        ).strip()
+
+        self.gemini_2_command = (
+            g2.get("command") or "gemini图2"
+        ).strip().lstrip("/")
+        self.gemini_2_model = (
+            g2.get("model") or "gemini-3-pro-image"
+        ).strip()
+        self.gemini_2_default_resolution = (
+            g2.get("default_resolution") or "1K"
+        ).strip()
 
         # Vertex model slots, compatible with old flat fields
         v1 = vertex_conf.get("vertex_1", {}) or {}
@@ -297,6 +336,53 @@ class Gemini_Images(Star):
                     provider_id="__manual_vertex_2__",
                     provider=vertex_provider_2,
                     default_resolution=self.vertex_2_default_resolution,
+                    default_aspect_ratio="自动",
+                )
+            )
+
+        if self.gemini_manual_enabled:
+            gemini_keys = [
+                str(x).strip()
+                for x in self.gemini_manual_keys
+                if isinstance(x, str) and str(x).strip()
+            ]
+
+            gemini_provider_1 = ProviderConfig(
+                name="manual_gemini_1",
+                api_type="gemini",
+                base_url=self.gemini_manual_base_url.rstrip("/"),
+                api_key=gemini_keys[0] if gemini_keys else "",
+                model=self.gemini_1_model,
+                gemini_keys=gemini_keys or None,
+            )
+
+            gemini_provider_2 = ProviderConfig(
+                name="manual_gemini_2",
+                api_type="gemini",
+                base_url=self.gemini_manual_base_url.rstrip("/"),
+                api_key=gemini_keys[0] if gemini_keys else "",
+                model=self.gemini_2_model,
+                gemini_keys=gemini_keys or None,
+            )
+
+            self.slots.append(
+                SlotConfig(
+                    slot_name="gemini_manual_1",
+                    command=self.gemini_1_command,
+                    provider_id="__manual_gemini_1__",
+                    provider=gemini_provider_1,
+                    default_resolution=self.gemini_1_default_resolution,
+                    default_aspect_ratio="自动",
+                )
+            )
+
+            self.slots.append(
+                SlotConfig(
+                    slot_name="gemini_manual_2",
+                    command=self.gemini_2_command,
+                    provider_id="__manual_gemini_2__",
+                    provider=gemini_provider_2,
+                    default_resolution=self.gemini_2_default_resolution,
                     default_aspect_ratio="自动",
                 )
             )
@@ -697,6 +783,16 @@ class Gemini_Images(Star):
 
     @filter.command("vertex图2")
     async def entry_cmd_vertex_2(self, event: AstrMessageEvent):
+        async for x in self._dispatch_generate(event):
+            yield x
+
+    @filter.command("gemini图")
+    async def entry_cmd_gemini_1(self, event: AstrMessageEvent):
+        async for x in self._dispatch_generate(event):
+            yield x
+
+    @filter.command("gemini图2")
+    async def entry_cmd_gemini_2(self, event: AstrMessageEvent):
         async for x in self._dispatch_generate(event):
             yield x
 
@@ -1212,6 +1308,12 @@ class Gemini_Images(Star):
             vertex_start = self._vertex_key_cursor
             self._vertex_key_cursor += 1
 
+        # Gemini 手动配置多 Key 跨请求轮换，机制同 Vertex
+        gemini_start = 0
+        if provider.api_type == "gemini" and provider.gemini_keys:
+            gemini_start = self._gemini_key_cursor
+            self._gemini_key_cursor += 1
+
         generator = AIImageGenerator(
             main_config=provider,
             timeout=self.timeout,
@@ -1219,6 +1321,7 @@ class Gemini_Images(Star):
             max_retries=self.max_retries,
             retry_delay=self.retry_interval,
             vertex_start_idx=vertex_start,
+            gemini_start_idx=gemini_start,
         )
 
         success = False

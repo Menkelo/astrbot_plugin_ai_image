@@ -44,6 +44,43 @@
 }
 ```
 
+## 方式三：Gemini 手动配置（官方/中转）
+
+适合直接使用 Gemini `generateContent` 接口（官方 API 或 Bearer 鉴权中转站，如 `https://meinianda.top/v1beta`）。
+
+### 步骤：
+
+1. 启用 `gemini_manual_config.enabled`
+2. `base_url` 填官方地址或中转地址（以 `/v1beta` 结尾）
+3. 填写 `keys` 列表，格式：`API_KEY`（多 Key 自动轮询）
+4. 配置两个模型槽位的命令和模型名
+5. 发送 `/gemini图 测试图片` 试试
+
+### 示例配置：
+
+```json
+{
+  "gemini_manual_config": {
+    "enabled": true,
+    "base_url": "https://meinianda.top/v1beta",
+    "keys": [
+      "your-api-key-1",
+      "your-api-key-2"
+    ],
+    "gemini_1": {
+      "command": "gemini图",
+      "model": "gemini-3.1-flash-image",
+      "default_resolution": "1K"
+    },
+    "gemini_2": {
+      "command": "gemini图2",
+      "model": "gemini-3-pro-image",
+      "default_resolution": "2K"
+    }
+  }
+}
+```
+
 ## 权限配置示例
 
 ### 白名单模式（仅特定用户可用）
@@ -95,6 +132,10 @@
 | `/生图 预设名 额外内容` | 预设+附加词 |
 | `[引用图片] /生图 <提示词>` | 图生图 |
 | `/生图 <提示词> @用户` | 使用头像 |
+| `/vertex图 <提示词>` | Vertex 手动模型1（需启用） |
+| `/vertex图2 <提示词>` | Vertex 手动模型2（需启用） |
+| `/gemini图 <提示词>` | Gemini 手动模型1（需启用） |
+| `/gemini图2 <提示词>` | Gemini 手动模型2（需启用） |
 
 ## 支持的比例
 
