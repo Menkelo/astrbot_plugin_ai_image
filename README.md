@@ -127,7 +127,7 @@
 > **注意事项：**
 > - 机器人管理员（AstrBot 全局配置中的管理员）自动等同白名单用户，无需手动将其 QQ 添加到 `permission_config.users`。
 > - 白名单用户（`permission_config.users`）不受每日次数限制。
-> - 分辨率控制（1K/2K/4K）：Gemini/OpenAI 渠道全部用户均可指定；Vertex 渠道白名单用户及管理员可指定，非白名单用户强制 1K。
+> - 分辨率控制（1K/2K/4K）：Gemini/OpenAI 渠道全部用户均可指定；Vertex 渠道仅在 `whitelist` 模式下限制非白名单用户强制 1K，`disable`/`blacklist` 模式对全部用户开放 1K/2K/4K。
 > - 插件会自动识别提供商的 API 类型（Gemini/OpenAI/Vertex），无需手动指定。
 
 ### 使用示例
@@ -209,7 +209,7 @@ A: 启用 Gemini 或 Vertex 手动配置即可使用双指令双模型；Gemini 
 A: 插件内置 3 次自动重试，失败后会显示简化的错误信息。检查 API Key 是否有效，配额是否充足。
 
 ### Q: 白名单用户有什么特权？
-A: 白名单用户不受每日免费次数限制，在 Vertex 渠道可使用 4K 分辨率（普通用户限制 1K）。Gemini/OpenAI 渠道所有用户均可指定 1K/2K/4K。机器人管理员（AstrBot 全局管理员）会自动享有上述白名单特权，无需手动添加自己的 QQ 到白名单。
+A: 白名单用户不受每日免费次数限制，在 Vertex 渠道且权限模式为 `whitelist` 时可使用 2K/4K 分辨率（非白名单用户限制 1K）。`disable`/`blacklist` 模式下 Vertex 渠道所有用户均可指定 1K/2K/4K；Gemini/OpenAI 渠道所有用户均可指定 1K/2K/4K。机器人管理员（AstrBot 全局管理员）会自动享有上述白名单特权，无需手动添加自己的 QQ 到白名单。
 
 ### Q: 如何获取用户头像作为参考图？
 A: 在命令中 @ 用户即可，如：`/生图 手办化 @用户A`

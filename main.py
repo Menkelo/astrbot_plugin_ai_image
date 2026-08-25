@@ -837,17 +837,30 @@ class Gemini_Images(Star):
     ) -> str:
         """
         仅 Vertex 渠道使用。
-        白名单用户及机器人管理员可指定 1K/2K/4K；
+        权限控制关闭（disable）或黑名单（blacklist）模式对所有用户开放 1K/2K/4K；
+        whitelist 模式下，白名单用户/群组及机器人管理员可指定 1K/2K/4K，
         非白名单用户无论群组状态，全部强制 1K。
         """
         uid = str(user_id).strip()
-        users = {str(u).strip() for u in self.perm_users}
+        gid = str(group_id).strip()
 
         req = (requested or slot_default or "1K").upper()
         if req not in {"1K", "2K", "4K"}:
             req = "1K"
 
-        if is_admin or uid in users:
+        mode = (self.perm_mode or "disable").strip()
+        if mode != "whitelist":
+            return req
+
+        if is_admin:
+            return req
+
+        users = {str(u).strip() for u in self.perm_users}
+        groups = {str(g).strip() for g in self.perm_groups}
+
+        if uid in users:
+            return req
+        if gid and gid in groups:
             return req
 
         return "1K"
