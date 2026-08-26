@@ -635,8 +635,20 @@ class Gemini_Images(Star):
         return True
 
     def _is_quota_exempt(
-        self, user_id: str, group_id: str = "", is_admin: bool = False
+        self,
+        user_id: str,
+        group_id: str = "",
+        is_admin: bool = False,
+        is_manual: bool = False,
     ) -> bool:
+        """判断是否免每日次数限制。
+
+        - 机器人管理员始终豁免。
+        - whitelist 模式下：
+          - 供应商渠道：白名单用户或白名单群组成员均豁免；
+          - 手动渠道（Gemini/Vertex）：仅白名单人员（users）豁免，
+            即使位于白名单群组，非白名单人员仍受每日次数限制。
+        """
         # 机器人管理员免每日次数限制
         if is_admin:
             return True
@@ -651,7 +663,7 @@ class Gemini_Images(Star):
 
             if uid in limit_users:
                 return True
-            if gid and gid in limit_groups:
+            if not is_manual and gid and gid in limit_groups:
                 return True
 
         return False
@@ -694,9 +706,13 @@ class Gemini_Images(Star):
             logger.warning(f"保存每日次数文件失败: {e}")
 
     async def _check_and_consume_quota(
-        self, user_id: str, group_id: str = "", is_admin: bool = False
+        self,
+        user_id: str,
+        group_id: str = "",
+        is_admin: bool = False,
+        is_manual: bool = False,
     ) -> tuple[bool, int]:
-        if self._is_quota_exempt(user_id, group_id, is_admin):
+        if self._is_quota_exempt(user_id, group_id, is_admin, is_manual):
             return True, -1
 
         if not self.enable_daily_quota:
@@ -1083,7 +1099,12 @@ class Gemini_Images(Star):
                 )
                 return
 
-        ok, remain = await self._check_and_consume_quota(user_id, group_id, is_admin)
+        # 手动渠道（Gemini/Vertex manual）豁免规则更严格：
+        # 仅白名单人员免次数，白名单群组成员不豁免。
+        is_manual = "manual" in (slot.slot_name or "")
+        ok, remain = await self._check_and_consume_quota(
+            user_id, group_id, is_admin, is_manual
+        )
         if not ok:
             yield event.plain_result(self.quota_exceeded_reply)
             return
