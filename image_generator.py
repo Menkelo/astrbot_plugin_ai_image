@@ -236,15 +236,73 @@ class AIImageGenerator:
         "504": "网关超时 (504)",
     }
 
+    # 具体错误关键词 -> 用户可读描述（按优先级匹配，先命中先返回）
+    ERROR_PATTERNS: list[tuple[str, str]] = [
+        (
+            r"model\s*['\"]?[^\s'\"]+['\"]?\s+(not found|does not exist)|model not found|模型.*不存在",
+            "模型不存在，请检查配置中的模型名",
+        ),
+        (
+            r"invalid_api_key|incorrect api key|api[_-]?key.*(invalid|not valid)|API_KEY_INVALID|UNAUTHENTICATED",
+            "API Key 无效，请检查 Key 配置",
+        ),
+        (
+            r"PERMISSION_DENIED|permission denied|没有权限|无权限|权限不足",
+            "API 权限不足，请检查 Key 权限",
+        ),
+        (
+            r"RESOURCE_EXHAUSTED|insufficient_quota|out of quota|quota.*(exceeded|exhausted)|配额|额度不足|没有足够余额",
+            "API 配额或余额不足",
+        ),
+        (
+            r"rate.?limit|RATE_LIMITED|请求过于频繁|请求太频繁|请求频率",
+            "请求过于频繁，请稍后再试",
+        ),
+        (
+            r"content_policy_violation|content filter|被安全策略拦截|内容.*安全策略|SAFETY|blocked",
+            "内容被安全策略拦截，请调整提示词",
+        ),
+        (
+            r"INVALID_ARGUMENT|invalid_request_error|请求参数有误|参数有误",
+            "请求参数有误",
+        ),
+        (
+            r"SERVER_ERROR|internal server error|服务端内部错误",
+            "服务端内部错误",
+        ),
+        (
+            r"NOT_FOUND|接口或模型不存在|资源不存在",
+            "接口或模型不存在",
+        ),
+    ]
+
+    # 脱敏规则：URL / Bearer Token / Key 参数 / 长十六进制串
+    _SENSITIVE_PATTERNS: list[tuple[str, str]] = [
+        (r"https?://[^\s'\"]+", "[URL]"),
+        (r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [KEY]"),
+        (r"x-goog-api-key\s*[:=]\s*[^\s'\"]+", "x-goog-api-key: [REDACTED]"),
+        (
+            r"(api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*[^\s'\"]+",
+            r"\1=[REDACTED]",
+        ),
+        (r"\b[0-9a-fA-F]{32,}\b", "[TOKEN]"),
+    ]
+
     def _short_api_error(self, error: str | None) -> str:
         """
         将详细错误压缩成用户可读的短错误，避免暴露完整 URL / 响应体。
+        优先按具体错误关键词分类，再匹配 HTTP 状态码，最后回退到通用描述。
         """
         err_str = str(error or "")
 
         # 内容安全拦截类消息已是可读文案，直接透传
         if "安全策略拦截" in err_str:
             return err_str
+
+        # 具体错误关键词分类（模型不存在 / Key 无效 / 配额不足 等）
+        for pattern, desc in self.ERROR_PATTERNS:
+            if re.search(pattern, err_str, re.IGNORECASE):
+                return desc
 
         status_match = (
             re.search(r"\bAPI\s+(\d{3})\b", err_str, re.IGNORECASE)
@@ -265,14 +323,14 @@ class AIImageGenerator:
             return "API 未返回图片"
 
         if (
-            "SSL" in err_str
-            or "ssl" in err_str
-            or "SSLError" in err_str
+            "SSLError" in err_str
             or "SSLV3_ALERT" in err_str
             or "CERTIFICATE_VERIFY_FAILED" in err_str
             or "WRONG_VERSION_NUMBER" in err_str
             or "DECRYPTION_FAILED_OR_BAD_RECORD_MAC" in err_str
             or "BAD_RECORD_MAC" in err_str
+            or "[SSL:" in err_str
+            or "ssl.SSL" in err_str
         ):
             return "SSL 连接失败"
 
@@ -313,6 +371,39 @@ class AIImageGenerator:
             return "Gemini Key 未配置"
 
         return "API 请求失败"
+
+    def _sanitize_error_summary(
+        self, error: str | None, max_len: int = 200
+    ) -> str:
+        """脱敏原始错误并截断，得到可用于用户可见的详情摘要。
+
+        过滤 URL / Bearer Token / API Key / 长 token，再压缩空白并截断。
+        摘要与短错误重复或为空时返回空串，由调用方决定是否追加。
+        """
+        s = str(error or "").strip()
+        if not s:
+            return ""
+
+        for pattern, repl in self._SENSITIVE_PATTERNS:
+            s = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+
+        s = re.sub(r"\s+", " ", s).strip()
+        if len(s) > max_len:
+            s = s[:max_len].rstrip() + "..."
+        return s
+
+    def _format_user_error(self, error: str | None) -> str:
+        """构造展示给用户的完整错误信息：短错误 + 脱敏原始摘要。"""
+        short = self._short_api_error(error)
+        detail = self._sanitize_error_summary(error)
+        if (
+            detail
+            and detail != short
+            and short not in detail
+            and detail not in short
+        ):
+            return f"{short}（详情: {detail}）"
+        return short
 
     def _no_image_error(self, data: object | None = None) -> tuple[None, str]:
         """
@@ -1170,7 +1261,7 @@ class AIImageGenerator:
                 logger.info(f"{prefix}未指定比例，根据参考图推断: {aspect_ratio}")
 
         retry_queue: list[ProviderConfig] = [self.main_config] * self.max_retries
-        last_error_short = "API 请求失败"
+        last_error = "API 请求失败"
 
         for i, provider in enumerate(retry_queue):
             logger.info(
@@ -1223,21 +1314,25 @@ class AIImageGenerator:
                     images = await self._ensure_png(images)
                     return images, None
 
-                last_error_short = self._short_api_error(error)
-                logger.warning(f"{prefix}生成失败: {last_error_short}")
+                last_error = self._format_user_error(error)
+                logger.warning(
+                    f"{prefix}生成失败: {last_error}\n原始错误: {error}"
+                )
 
                 if self._is_non_retryable(error):
-                    logger.info(f"{prefix}错误不可重试（{last_error_short}），停止重试")
-                    return None, last_error_short
+                    logger.info(
+                        f"{prefix}错误不可重试（{last_error}），停止重试"
+                    )
+                    return None, last_error
 
             except Exception as e:
                 logger.error(f"{prefix}异常: {e}\n{traceback.format_exc()}")
-                last_error_short = self._short_api_error(str(e))
+                last_error = self._format_user_error(str(e))
 
             if i < len(retry_queue) - 1:
                 await asyncio.sleep(self.retry_delay)
 
-        return None, last_error_short
+        return None, last_error
 
     # =========================
     # OpenAI
