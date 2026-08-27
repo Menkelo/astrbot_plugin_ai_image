@@ -668,6 +668,34 @@ class Gemini_Images(Star):
 
         return False
 
+    def _is_manual_channel_allowed(
+        self, user_id: str, group_id: str = "", is_admin: bool = False
+    ) -> bool:
+        """手动渠道（Gemini/Vertex manual）使用门槛。
+
+        仅 whitelist 模式生效：白名单人员（users）或白名单群组成员（groups）
+        可使用手动渠道；机器人管理员始终可用；disable/blacklist 等其余模式放行。
+        """
+        if is_admin:
+            return True
+
+        mode = (self.perm_mode or "disable").strip()
+        if mode != "whitelist":
+            return True
+
+        uid = str(user_id).strip()
+        gid = str(group_id).strip()
+
+        users = {str(u).strip() for u in self.perm_users}
+        groups = {str(g).strip() for g in self.perm_groups}
+
+        if uid in users:
+            return True
+        if gid and gid in groups:
+            return True
+
+        return False
+
     def _today_str(self) -> str:
         return time.strftime("%Y-%m-%d", time.localtime())
 
@@ -1083,6 +1111,15 @@ class Gemini_Images(Star):
                 yield event.plain_result(self.perm_no_permission_reply)
             return
 
+        # 手动渠道（Gemini/Vertex manual）仅 whitelist 模式下白名单范围（人员/群组）可用
+        is_manual = "manual" in (slot.slot_name or "")
+        if is_manual and not self._is_manual_channel_allowed(
+            user_id, group_id, is_admin
+        ):
+            if not self.perm_silent:
+                yield event.plain_result(self.perm_no_permission_reply)
+            return
+
         provider = self._resolve_provider_with_fallback(slot)
         if not provider:
             yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
@@ -1099,9 +1136,6 @@ class Gemini_Images(Star):
                 )
                 return
 
-        # 手动渠道（Gemini/Vertex manual）豁免规则更严格：
-        # 仅白名单人员免次数，白名单群组成员不豁免。
-        is_manual = "manual" in (slot.slot_name or "")
         ok, remain = await self._check_and_consume_quota(
             user_id, group_id, is_admin, is_manual
         )
