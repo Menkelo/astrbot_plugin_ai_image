@@ -205,8 +205,9 @@ class AIImageGenerator:
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # 跟随重定向：图片预签名 URL（如 S3 accelerate）常见 301/307
-            self._session = aiohttp.ClientSession(follow_redirects=True)
+            # 预签名图片 URL（如 S3 accelerate）常见 301/307，
+            # aiohttp 各请求方法默认 allow_redirects=True，无需额外配置
+            self._session = aiohttp.ClientSession()
             self._owns_session = True
         return self._session
 
@@ -1002,13 +1003,15 @@ class AIImageGenerator:
             new_w = max(1, int(round(w * scale)))
             new_h = max(1, int(round(h * scale)))
 
-            if img.mode in ("RGBA", "LA", "P"):
-                img = img.convert("RGB")
+            if img.mode in ("P", "LA"):
+                img = img.convert("RGBA")
 
             img = img.resize((new_w, new_h), Image.LANCZOS)
 
+            # 存 PNG 而非 JPEG：后续 _ensure_png 会统一转 PNG，
+            # 这里若先经 JPEG 会把压缩伪影永久烤进最终 PNG
             output = BytesIO()
-            img.save(output, format="JPEG", quality=95)
+            img.save(output, format="PNG")
             return output.getvalue()
         except Exception:
             return image_data

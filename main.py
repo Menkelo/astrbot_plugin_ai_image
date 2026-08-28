@@ -151,7 +151,6 @@ class Gemini_Images(Star):
             self._http_session = aiohttp.ClientSession(
                 connector=connector,
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
-                follow_redirects=True,
             )
         return self._http_session
 
