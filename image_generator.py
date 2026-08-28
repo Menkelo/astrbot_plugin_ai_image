@@ -220,63 +220,160 @@ class AIImageGenerator:
     # Error / Response Helpers
     # =========================
 
-    # HTTP 状态码 -> 用户可读说明
-    CODE_DESC: dict[str, str] = {
-        "400": "请求参数有误 (400)",
-        "401": "API Key 无效或未授权 (401)",
-        "403": "无访问权限或 Key 被拒 (403)",
-        "404": "接口或模型不存在 (404)",
-        "408": "请求超时 (408)",
-        "409": "请求冲突 (409)",
-        "413": "请求体过大 (413)",
-        "415": "不支持的媒体类型 (415)",
-        "422": "请求无法处理 (422)",
-        "429": "请求过于频繁或配额已用尽 (429)",
-        "500": "服务端内部错误 (500)",
-        "502": "网关错误 (502)",
-        "503": "服务暂不可用 (503)",
-        "504": "网关超时 (504)",
-    }
-
-    # 具体错误关键词 -> 用户可读描述（按优先级匹配，先命中先返回）
-    ERROR_PATTERNS: list[tuple[str, str]] = [
+    # 统一错误分类表：(匹配正则, 结论, 处理建议)
+    #
+    # 各中转站的报错文案千差万别（英文/中文/自定义 JSON），这里把它们归一到
+    # 固定的几类结论上，保证用户看到的永远是同一套中文说明。
+    # 按顺序匹配，先命中先返回；语义关键词整体排在 HTTP 状态码之前，
+    # 使「400 + content_policy_violation」被判为内容拦截而非笼统的参数错误。
+    ERROR_RULES: list[tuple[str, str, str]] = [
         (
-            r"model\s*['\"]?[^\s'\"]+['\"]?\s+(not found|does not exist)|model not found|模型.*不存在",
-            "模型不存在，请检查配置中的模型名",
+            r"content[_ -]?policy|content[_ -]?filter|prohibited[_ -]?content"
+            r"|image[_ -]?safety|blocklist|recitation|blocked by|违规|敏感内容",
+            "内容被安全策略拦截",
+            "请调整提示词，避免暴力、色情、政治或真实人物等敏感内容；"
+            "图生图时参考图同样会被审核",
         ),
         (
-            r"invalid_api_key|incorrect api key|api[_-]?key.*(invalid|not valid)|API_KEY_INVALID|UNAUTHENTICATED",
-            "API Key 无效，请检查 Key 配置",
+            r"invalid[_ -]?api[_ -]?key|incorrect api key|API_KEY_INVALID"
+            r"|UNAUTHENTICATED|invalid[_ -]?token|api[_ -]?key.*(invalid|not valid)"
+            r"|令牌(验证失败|无效|不存在|状态不可用)|无效的(令牌|密钥)",
+            "API Key 无效或已失效",
+            "请检查配置面板里的 Key 是否填写完整、有无多余空格，或是否已被中转站禁用",
         ),
         (
-            r"PERMISSION_DENIED|permission denied|没有权限|无权限|权限不足",
-            "API 权限不足，请检查 Key 权限",
+            r"无可用渠道|没有可用的渠道|no available channel|当前分组.*无可用",
+            "中转站没有可用的上游渠道",
+            "对方暂时没有能跑这个模型的后端，请更换模型或更换中转站",
         ),
         (
-            r"RESOURCE_EXHAUSTED|insufficient_quota|out of quota|quota.*(exceeded|exhausted)|配额|额度不足|没有足够余额",
-            "API 配额或余额不足",
+            r"PERMISSION_DENIED|permission denied|not allowed"
+            r"|无权限|无权访问|没有权限|权限不足",
+            "API Key 无权访问该模型",
+            "请确认这个 Key 已开通对应模型的权限，或更换渠道",
         ),
         (
-            r"rate.?limit|RATE_LIMITED|请求过于频繁|请求太频繁|请求频率",
-            "请求过于频繁，请稍后再试",
+            r"RESOURCE_EXHAUSTED|insufficient_quota|out of quota"
+            r"|quota.*(exceeded|exhausted)|billing"
+            r"|余额不足|额度不足|配额|欠费|没有足够",
+            "账户余额或配额不足",
+            "请到中转站充值，或确认免费额度是否已经用完",
         ),
         (
-            r"content_policy_violation|content filter|被安全策略拦截|内容.*安全策略|SAFETY|blocked",
-            "内容被安全策略拦截，请调整提示词",
+            r"rate.?limit|RATE_LIMITED|too many requests"
+            r"|请求过于频繁|请求太频繁|请求频率",
+            "请求过于频繁，被限流",
+            "请等待 30 秒后重试；若多人同时使用，可在配置面板调低重试次数",
         ),
         (
-            r"INVALID_ARGUMENT|invalid_request_error|请求参数有误|参数有误",
-            "请求参数有误",
+            r"model\s*['\"]?[^\s'\"]+['\"]?\s+(not found|does not exist)"
+            r"|model[_ -]?not[_ -]?found|unknown model"
+            r"|模型.*不存在|不支持的模型|无效的模型",
+            "模型名不存在，或该渠道不提供此模型",
+            "请核对配置面板里的模型名；Gemini 渠道可用「自动获取模型」确认可用列表",
         ),
         (
-            r"SERVER_ERROR|internal server error|服务端内部错误",
-            "服务端内部错误",
+            r"payload too large|request entity too large"
+            r"|image.*(too large|size limit)|文件过大|图片过大|超过大小",
+            "上传的图片过大，被服务端拒绝",
+            "请压缩参考图或减少垫图数量",
         ),
         (
-            r"NOT_FOUND|接口或模型不存在|资源不存在",
-            "接口或模型不存在",
+            r"INVALID_ARGUMENT|invalid[_ -]?request|invalid[_ -]?parameter"
+            r"|unsupported.*(parameter|value)|参数.*(有误|错误|无效)|不支持的参数",
+            "请求参数被服务端拒绝",
+            "多为中转站不支持所选的比例或分辨率，请试着改回「自动」比例和 1K 分辨率",
+        ),
+        (
+            r"请求超时|timed out|timeout|TimeoutError|ETIMEDOUT",
+            "请求超时",
+            "中转站响应太慢或图片过大，可在配置面板调大超时时间后重试",
+        ),
+        (
+            r"SSLError|SSLV3|CERTIFICATE_VERIFY_FAILED|WRONG_VERSION_NUMBER"
+            r"|BAD_RECORD_MAC|\[SSL:|ssl\.SSL|certificate",
+            "SSL/TLS 连接失败",
+            "多为接口地址写错（如 http 写成 https、端口不对）或证书异常，请检查 base_url",
+        ),
+        (
+            r"Cannot connect|Connection (reset|refused|closed|aborted)"
+            r"|Server disconnected|ClientConnectorError|getaddrinfo"
+            r"|Name or service not known|Temporary failure in name resolution"
+            r"|ENOTFOUND|ECONNREFUSED",
+            "无法连接到 API 服务器",
+            "请检查 base_url 是否正确、服务器能否访问外网、代理是否正常",
+        ),
+        (
+            r"SERVER_ERROR|internal server error|bad gateway"
+            r"|service unavailable|服务端内部错误|网关",
+            "中转站服务端故障",
+            "这是对方服务器的问题，请稍后重试；持续出现请更换中转站",
+        ),
+        (
+            r"API 未返回图片|响应中未找到图片数据",
+            "接口调用成功，但返回内容里没有图片",
+            "该模型可能不支持生图，或中转站把图片放在了非常规字段；"
+            "请确认模型名，或更换渠道",
+        ),
+        (
+            r"响应解析失败|JSON ?解析失败|JSONDecodeError|Expecting value",
+            "无法解析接口返回的内容",
+            "中转站返回了非标准格式（可能是 HTML 错误页或空响应），"
+            "请检查 base_url 是否指向正确的接口",
+        ),
+        (
+            r"未配置提供商",
+            "插件尚未配置可用的提供商",
+            "请在配置面板填写 base_url、API Key 和模型名",
+        ),
+        (
+            r"Vertex keys 未配置",
+            "Vertex Key 未配置或格式错误",
+            "Vertex Key 需填成 API_KEY|PROJECT_ID 的格式（中间是竖线）",
+        ),
+        (
+            r"Gemini Key 未配置",
+            "Gemini Key 未配置",
+            "请在配置面板填写 Gemini 渠道的 API Key",
         ),
     ]
+
+    # HTTP 状态码兜底：(结论, 处理建议)。仅在上面的语义规则全部未命中时使用。
+    CODE_RULES: dict[str, tuple[str, str]] = {
+        "400": (
+            "请求被服务端拒绝（400）",
+            "参数不被支持，可试着把比例改回「自动」、分辨率改回 1K",
+        ),
+        "401": (
+            "API Key 未通过验证（401）",
+            "请检查 Key 是否填写正确、是否已过期",
+        ),
+        "403": (
+            "访问被拒绝（403）",
+            "Key 没有该模型的权限，或来源 IP 被中转站限制",
+        ),
+        "404": (
+            "接口或模型不存在（404）",
+            "请检查 base_url 结尾是否多写/少写了 /v1beta，以及模型名是否正确",
+        ),
+        "408": ("服务端等待超时（408）", "请稍后重试"),
+        "409": ("请求冲突（409）", "请稍后重试"),
+        "413": ("请求体过大（413）", "参考图太大，请压缩后重试"),
+        "415": ("不支持的图片格式（415）", "请改用 PNG 或 JPEG 格式的参考图"),
+        "422": (
+            "请求无法处理（422）",
+            "参数组合不被该渠道支持，请调整比例或分辨率",
+        ),
+        "429": (
+            "请求过于频繁或配额已用尽（429）",
+            "请等待 30 秒后重试；也可能是余额或免费额度已用完",
+        ),
+        "500": ("中转站内部错误（500）", "对方服务器故障，请稍后重试"),
+        "502": ("网关错误（502）", "中转站到上游的连接有问题，请稍后重试"),
+        "503": ("服务暂不可用（503）", "对方服务器过载或维护中，请稍后重试"),
+        "504": ("网关超时（504）", "上游响应太慢，请稍后重试或调大超时时间"),
+    }
+
 
     # 脱敏规则：URL / Bearer Token / Key 参数 / 长十六进制串
     _SENSITIVE_PATTERNS: list[tuple[str, str]] = [
@@ -291,89 +388,42 @@ class AIImageGenerator:
         (r"\b[0-9a-fA-F]{32,}\b", "[TOKEN]"),
     ]
 
-    def _short_api_error(self, error: str | None) -> str:
-        """
-        将详细错误压缩成用户可读的短错误，避免暴露完整 URL / 响应体。
-        优先按具体错误关键词分类，再匹配 HTTP 状态码，最后回退到通用描述。
+    def _classify_error(self, error: str | None) -> tuple[str, str] | None:
+        """把任意上游错误归类成统一的 (结论, 处理建议)。无法归类时返回 None。
+
+        匹配顺序：内容安全拦截（已是成品文案）> 语义关键词 > HTTP 状态码。
         """
         err_str = str(error or "")
+        if not err_str.strip():
+            return None
 
-        # 内容安全拦截类消息已是可读文案，直接透传
+        # 内容安全拦截的文案由 _gemini_block_reason 生成，已带具体拦截原因，
+        # 直接复用为结论，只补一条统一的处理建议
         if "安全策略拦截" in err_str:
-            return err_str
+            return (
+                err_str.strip(),
+                "请调整提示词，避免暴力、色情、政治或真实人物等敏感内容",
+            )
 
-        # 具体错误关键词分类（模型不存在 / Key 无效 / 配额不足 等）
-        for pattern, desc in self.ERROR_PATTERNS:
+        for pattern, conclusion, advice in self.ERROR_RULES:
             if re.search(pattern, err_str, re.IGNORECASE):
-                return desc
+                return conclusion, advice
 
+        # 状态码只从结构化位置提取，避免把响应体里的普通数字（如尺寸 1408）
+        # 误判成 HTTP 状态码
         status_match = (
             re.search(r"\bAPI\s+(\d{3})\b", err_str, re.IGNORECASE)
             or re.search(r"\bHTTP\s+(\d{3})\b", err_str, re.IGNORECASE)
             or re.search(r'"code"\s*:\s*(\d{3})', err_str)
             or re.search(r"'code'\s*:\s*(\d{3})", err_str)
         )
-
         if status_match:
             code = status_match.group(1)
-            return self.CODE_DESC.get(code, f"API {code}")
+            if code in self.CODE_RULES:
+                return self.CODE_RULES[code]
+            return f"接口返回异常状态码（{code}）", "请查看日志中的完整错误信息"
 
-        for code, desc in self.CODE_DESC.items():
-            if code in err_str:
-                return desc
-
-        if "API 未返回图片" in err_str or "响应中未找到图片数据" in err_str:
-            return "API 未返回图片"
-
-        if (
-            "SSLError" in err_str
-            or "SSLV3_ALERT" in err_str
-            or "CERTIFICATE_VERIFY_FAILED" in err_str
-            or "WRONG_VERSION_NUMBER" in err_str
-            or "DECRYPTION_FAILED_OR_BAD_RECORD_MAC" in err_str
-            or "BAD_RECORD_MAC" in err_str
-            or "[SSL:" in err_str
-            or "ssl.SSL" in err_str
-        ):
-            return "SSL 连接失败"
-
-        if (
-            "Cannot connect" in err_str
-            or "Connection reset" in err_str
-            or "Connection refused" in err_str
-            or "Connection closed" in err_str
-            or "Server disconnected" in err_str
-            or "ClientConnectorError" in err_str
-            or "Name or service not known" in err_str
-            or "Temporary failure in name resolution" in err_str
-            or "getaddrinfo failed" in err_str
-        ):
-            return "网络连接失败"
-
-        if (
-            "请求超时" in err_str
-            or "Timeout" in err_str
-            or "timeout" in err_str
-            or "asyncio.exceptions.TimeoutError" in err_str
-        ):
-            return "API 请求超时"
-
-        if "NoneType" in err_str:
-            return "API 响应解析失败"
-
-        if "JSON解析失败" in err_str or "json" in err_str.lower():
-            return "API 响应解析失败"
-
-        if "未配置提供商" in err_str:
-            return "未配置提供商"
-
-        if "Vertex keys 未配置" in err_str:
-            return "Vertex Key 未配置"
-
-        if "Gemini Key 未配置" in err_str:
-            return "Gemini Key 未配置"
-
-        return "API 请求失败"
+        return None
 
     def _sanitize_error_summary(
         self, error: str | None, max_len: int = 200
@@ -381,7 +431,7 @@ class AIImageGenerator:
         """脱敏原始错误并截断，得到可用于用户可见的详情摘要。
 
         过滤 URL / Bearer Token / API Key / 长 token，再压缩空白并截断。
-        摘要与短错误重复或为空时返回空串，由调用方决定是否追加。
+        仅在错误无法归类时使用，为空则返回空串。
         """
         s = str(error or "").strip()
         if not s:
@@ -396,17 +446,21 @@ class AIImageGenerator:
         return s
 
     def _format_user_error(self, error: str | None) -> str:
-        """构造展示给用户的完整错误信息：短错误 + 脱敏原始摘要。"""
-        short = self._short_api_error(error)
+        """构造展示给用户的错误信息：统一为「结论 + 💡 处理建议」两行。
+
+        已归类的错误不再附带上游原文（各中转站文案不一，反而干扰判断），
+        完整原始错误由调用方写入日志。仅在无法归类时附上脱敏原文，
+        方便用户直接反馈。
+        """
+        classified = self._classify_error(error)
+        if classified:
+            conclusion, advice = classified
+            return f"{conclusion}\n💡 {advice}"
+
         detail = self._sanitize_error_summary(error)
-        if (
-            detail
-            and detail != short
-            and short not in detail
-            and detail not in short
-        ):
-            return f"{short}（详情: {detail}）"
-        return short
+        if detail:
+            return f"未识别的错误\n💡 请把下面的信息反馈给插件作者\n📋 {detail}"
+        return "未识别的错误\n💡 请查看 AstrBot 日志获取完整错误信息"
 
     def _no_image_error(self, data: object | None = None) -> tuple[None, str]:
         """
@@ -1168,7 +1222,7 @@ class AIImageGenerator:
 
         pf = data.get("promptFeedback")
         if isinstance(pf, dict) and pf.get("blockReason"):
-            return f"提示词被安全策略拦截（{pf.get('blockReason')}），请调整后再试"
+            return f"提示词被安全策略拦截（{pf.get('blockReason')}）"
 
         candidates = data.get("candidates")
         if isinstance(candidates, list):
@@ -1177,7 +1231,7 @@ class AIImageGenerator:
                     continue
                 fr = cand.get("finishReason")
                 if fr and str(fr) in self.GEMINI_BLOCK_REASONS:
-                    return f"图片被安全策略拦截（{fr}），请调整提示词后再试"
+                    return f"图片被安全策略拦截（{fr}）"
 
         return None
 
