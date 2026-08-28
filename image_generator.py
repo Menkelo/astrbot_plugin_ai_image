@@ -224,16 +224,11 @@ class AIImageGenerator:
     #
     # 各中转站的报错文案千差万别（英文/中文/自定义 JSON），这里把它们归一到
     # 固定的几类结论上，保证用户看到的永远是同一套中文说明。
-    # 按顺序匹配，先命中先返回；语义关键词整体排在 HTTP 状态码之前，
-    # 使「400 + content_policy_violation」被判为内容拦截而非笼统的参数错误。
+    # 按顺序匹配，先命中先返回。排序原则：先放特征词唯一、不会误伤的规则
+    # （Key / 渠道 / 余额 / 限流 / 模型），再放措辞宽泛的内容审核规则，
+    # 最后才是 HTTP 状态码兜底——因为 400/422 这类状态码本身无法区分
+    # 「参数不支持」和「内容被拦截」，必须优先靠文案判断。
     ERROR_RULES: list[tuple[str, str, str]] = [
-        (
-            r"content[_ -]?policy|content[_ -]?filter|prohibited[_ -]?content"
-            r"|image[_ -]?safety|blocklist|recitation|blocked by|违规|敏感内容",
-            "内容被安全策略拦截",
-            "请调整提示词，避免暴力、色情、政治或真实人物等敏感内容；"
-            "图生图时参考图同样会被审核",
-        ),
         (
             r"invalid[_ -]?api[_ -]?key|incorrect api key|API_KEY_INVALID"
             r"|UNAUTHENTICATED|invalid[_ -]?token|api[_ -]?key.*(invalid|not valid)"
@@ -271,6 +266,24 @@ class AIImageGenerator:
             r"|模型.*不存在|不支持的模型|无效的模型",
             "模型名不存在，或该渠道不提供此模型",
             "请核对配置面板里的模型名；Gemini 渠道可用「自动获取模型」确认可用列表",
+        ),
+        (
+            # 内容审核的措辞各家差异极大，这里尽量覆盖常见说法：
+            # Google "violated ... Prohibited Use policy" / "filtered out" /
+            # "Try rephrasing the prompt"，OpenAI "content_policy_violation"，
+            # 以及各中转站的中文文案。
+            r"content[_ -]?policy|content[_ -]?filter|prohibited[_ -]?(use|content)"
+            r"|image[_ -]?safety|safety[_ -]?(filter|policy|setting)"
+            r"|blocklist|recitation|generative ai prohibited"
+            r"|usage polic|acceptable use"
+            r"|filtered out|try rephrasing|rephras\w*\s+the\s+prompt"
+            r"|(image|images|content|prompt|request)s?\s+(was|were|is|are)?\s*"
+            r"(filtered|blocked|rejected)"
+            r"|nsfw|sexually explicit|explicit content"
+            r"|违规|敏感内容|色情|涉黄|不良信息|违反.{0,6}政策|内容审核",
+            "内容被安全策略拦截",
+            "请调整提示词，避免暴力、色情、政治或真实人物等敏感内容；"
+            "图生图时参考图同样会被审核",
         ),
         (
             r"payload too large|request entity too large"
@@ -341,8 +354,9 @@ class AIImageGenerator:
     # HTTP 状态码兜底：(结论, 处理建议)。仅在上面的语义规则全部未命中时使用。
     CODE_RULES: dict[str, tuple[str, str]] = {
         "400": (
-            "请求被服务端拒绝（400）",
-            "参数不被支持，可试着把比例改回「自动」、分辨率改回 1K",
+            "请求被拒绝（400）",
+            "多为提示词触发了内容审核，其次才是比例/分辨率参数不被支持。"
+            "请先换个说法重试；仍失败再把比例改回「自动」、分辨率改回 1K",
         ),
         "401": (
             "API Key 未通过验证（401）",
@@ -361,8 +375,9 @@ class AIImageGenerator:
         "413": ("请求体过大（413）", "参考图太大，请压缩后重试"),
         "415": ("不支持的图片格式（415）", "请改用 PNG 或 JPEG 格式的参考图"),
         "422": (
-            "请求无法处理（422）",
-            "参数组合不被该渠道支持，请调整比例或分辨率",
+            "请求被拒绝（422）",
+            "多为提示词触发了内容审核，其次才是参数组合不被该渠道支持。"
+            "请先换个说法重试；仍失败再调整比例或分辨率",
         ),
         "429": (
             "请求过于频繁或配额已用尽（429）",
@@ -414,6 +429,7 @@ class AIImageGenerator:
         status_match = (
             re.search(r"\bAPI\s+(\d{3})\b", err_str, re.IGNORECASE)
             or re.search(r"\bHTTP\s+(\d{3})\b", err_str, re.IGNORECASE)
+            or re.search(r"status_?code\s*[=:]\s*(\d{3})", err_str, re.IGNORECASE)
             or re.search(r'"code"\s*:\s*(\d{3})', err_str)
             or re.search(r"'code'\s*:\s*(\d{3})", err_str)
         )
@@ -1207,7 +1223,11 @@ class AIImageGenerator:
         if not error:
             return False
         err = str(error)
-        if "安全策略拦截" in err:
+        # 内容被拦截时重试同样会被拦。改由统一分类器判定，这样各中转站的
+        # 英文拦截文案（如 "filtered out ... Prohibited Use policy"）即使
+        # 挂在可重试的状态码上，也不会白白重试三次
+        classified = self._classify_error(err)
+        if classified and "安全策略拦截" in classified[0]:
             return True
         m = re.search(r"\bAPI\s+(\d{3})\b", err)
         return bool(m and m.group(1) in self.NON_RETRYABLE_CODES)
