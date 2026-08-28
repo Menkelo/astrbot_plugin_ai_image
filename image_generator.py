@@ -205,7 +205,8 @@ class AIImageGenerator:
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            # 跟随重定向：图片预签名 URL（如 S3 accelerate）常见 301/307
+            self._session = aiohttp.ClientSession(follow_redirects=True)
             self._owns_session = True
         return self._session
 
@@ -285,6 +286,7 @@ class AIImageGenerator:
             r"(api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*[^\s'\"]+",
             r"\1=[REDACTED]",
         ),
+        (r"sk-[A-Za-z0-9_-]{8,}", "sk-[REDACTED]"),
         (r"\b[0-9a-fA-F]{32,}\b", "[TOKEN]"),
     ]
 
@@ -672,6 +674,10 @@ class AIImageGenerator:
                     continue
 
                 if isinstance(value, (dict, list)):
+                    await walk(value)
+                    continue
+
+                if isinstance(value, str):
                     await walk(value)
 
         if raw_text:
@@ -1876,13 +1882,23 @@ class AIImageGenerator:
 
             session = self._get_session()
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=30)
+                url,
+                timeout=aiohttp.ClientTimeout(total=60),
+                headers={"User-Agent": "Mozilla/5.0"},
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     if self._is_image_bytes(data):
                         return data
-        except Exception:
-            pass
-
+                logger.warning(
+                    f"下载图片失败 status={resp.status} url={self._mask_url(url)}"
+                )
+        except Exception as e:
+            logger.warning(f"下载图片异常: {e} url={self._mask_url(url)}")
         return None
+
+    @staticmethod
+    def _mask_url(url: str, keep: int = 80) -> str:
+        if not url:
+            return ""
+        return url if len(url) <= keep else f"{url[:keep]}..."
