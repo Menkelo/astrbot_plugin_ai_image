@@ -293,7 +293,8 @@ class AIImageGenerator:
         ),
         (
             r"INVALID_ARGUMENT|invalid[_ -]?request|invalid[_ -]?parameter"
-            r"|unsupported.*(parameter|value)|参数.*(有误|错误|无效)|不支持的参数",
+            r"|unsupported.*(parameter|value)|unknown (name|field)|cannot find field"
+            r"|参数.*(有误|错误|无效)|不支持的参数",
             "请求参数被服务端拒绝",
             "多为中转站不支持所选的比例或分辨率，请试着改回「自动」比例和 1K 分辨率",
         ),
@@ -481,10 +482,17 @@ class AIImageGenerator:
     def _no_image_error(self, data: object | None = None) -> tuple[None, str]:
         """
         API 成功响应但没有图片时统一返回。
+
+        响应体摘要必须一并带回：不少中转站会以 HTTP 200 返回内容审核提示
+        （图片位置换成一段说明文字），若在此处丢弃摘要，上层分类器只能看到
+        「API 未返回图片」，既无法给出正确结论，也会把必然失败的请求重试三次。
         """
-        if data is not None:
-            logger.warning(f"API 未返回图片，原始响应摘要: {str(data)[:300]}")
-        return None, "API 未返回图片"
+        if data is None:
+            return None, "API 未返回图片"
+
+        summary = str(data)[:300]
+        logger.warning(f"API 未返回图片，原始响应摘要: {summary}")
+        return None, f"API 未返回图片: {summary}"
 
     def _is_image_bytes(self, b: bytes | None) -> bool:
         if not b:
@@ -1215,6 +1223,14 @@ class AIImageGenerator:
     # Main Generate
     # =========================
 
+    def _is_content_block(self, error: str | None) -> bool:
+        """判断错误是否属于内容审核拦截。
+
+        这类请求换参数重发、或原样重试都必然再次被拒，调用方据此跳过重试。
+        """
+        classified = self._classify_error(error)
+        return bool(classified and "安全策略拦截" in classified[0])
+
     def _is_non_retryable(self, error: str | None) -> bool:
         """根据错误信息判断是否为不可重试的错误。
 
@@ -1223,11 +1239,10 @@ class AIImageGenerator:
         if not error:
             return False
         err = str(error)
-        # 内容被拦截时重试同样会被拦。改由统一分类器判定，这样各中转站的
+        # 内容被拦截时重试同样会被拦。由统一分类器判定，这样各中转站的
         # 英文拦截文案（如 "filtered out ... Prohibited Use policy"）即使
         # 挂在可重试的状态码上，也不会白白重试三次
-        classified = self._classify_error(err)
-        if classified and "安全策略拦截" in classified[0]:
+        if self._is_content_block(err):
             return True
         m = re.search(r"\bAPI\s+(\d{3})\b", err)
         return bool(m and m.group(1) in self.NON_RETRYABLE_CODES)
@@ -1412,6 +1427,14 @@ class AIImageGenerator:
                 logger.error(f"{prefix}异常: {e}\n{traceback.format_exc()}")
                 last_error = self._format_user_error(str(e))
 
+                # 异常路径同样要判定可重试性，否则内容拦截等必然失败的情况
+                # 会在这里被无条件重试
+                if self._is_non_retryable(str(e)):
+                    logger.info(
+                        f"{prefix}错误不可重试（{last_error}），停止重试"
+                    )
+                    return None, last_error
+
             if i < len(retry_queue) - 1:
                 await asyncio.sleep(self.retry_delay)
 
@@ -1542,7 +1565,14 @@ class AIImageGenerator:
                 if response.status == 400 and size:
                     # size 不被当前端点支持（严格 OpenAI 枚举值）时去掉重试，
                     # 由生成后长边放大兜底保证 2K/4K 输出
+                    body = await response.text()
                     response.close()
+
+                    # 内容审核类 400 与 size 无关，去掉也会被拒，直接返回
+                    err = f"API {response.status}: {body[:300]}"
+                    if self._is_content_block(err):
+                        return None, err
+
                     payload.pop("size", None)
                     response = await _post_generations(payload)
                 async with response:
@@ -1594,7 +1624,14 @@ class AIImageGenerator:
             response = await _post_edits(True)
             if response.status == 400 and size:
                 # size 不被当前端点支持时去掉重试（auto），由本地长边放大兜底
+                body = await response.text()
                 response.close()
+
+                # 内容审核类 400 与 size 无关，去掉也会被拒，直接返回
+                err = f"API {response.status}: {body[:300]}"
+                if self._is_content_block(err):
+                    return None, err
+
                 response = await _post_edits(False)
             async with response:
                 if response.status != 200:
@@ -1772,7 +1809,15 @@ class AIImageGenerator:
                 # generationConfig 为可选字段，部分中转站不识别
                 # imageConfig/responseModalities 等会返回 400，去掉重试一次，
                 # 比例/分辨率由本地后处理（裁剪/长边放大）兜底保证生效
+                body = await response.text()
                 response.close()
+
+                # 但内容审核类 400 与参数无关，去掉字段重发一样会被拒，
+                # 直接返回，避免每次尝试都白白多发一次请求
+                err = f"API {response.status}: {body[:300]}"
+                if self._is_content_block(err):
+                    return None, err
+
                 payload.pop("generationConfig", None)
                 response = await _post_gemini(payload)
 
