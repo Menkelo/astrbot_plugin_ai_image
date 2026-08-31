@@ -49,6 +49,23 @@ class Gemini_Images(Star):
         "gemini_manual_2": "gemini-3-pro-image",
     }
 
+    # 群文件图片判定：文件名扩展名白名单
+    _IMAGE_EXTENSIONS = frozenset(
+        {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".svg",
+            ".heic",
+            ".heif",
+        }
+    )
+
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.context = context
@@ -1282,6 +1299,16 @@ class Gemini_Images(Star):
                 if url:
                     tasks.append(self._download_image(url))
 
+            elif isinstance(component, Comp.File):
+                # 群文件图片：直接发送的群文件图片（适配器已解析出 URL 或本地路径）
+                if self._is_image_file_name(component.name) or self._is_image_file_name(
+                    component.url
+                ):
+                    if component.url:
+                        tasks.append(self._download_image(component.url))
+                    elif component.file_ and os.path.exists(component.file_):
+                        tasks.append(self._download_image(component.file_))
+
             elif isinstance(component, Comp.At):
                 if component.qq != "all":
                     uid = str(component.qq)
@@ -1304,41 +1331,128 @@ class Gemini_Images(Star):
             try:
                 if not event.bot:
                     return images_data
+                reply_images = await self._resolve_reply_images(event, reply_comp)
+                if reply_images:
+                    # 引用图片作为图一，插入最前；附带图片按原顺序排在后面
+                    images_data[0:0] = reply_images
+            except Exception as e:
+                logger.debug(f"获取引用图片失败: {e}")
 
+        return images_data
+
+    @staticmethod
+    def _is_image_file_name(name: str | None) -> bool:
+        """根据文件名或 URL 判断是否为图片（按扩展名白名单判定）。"""
+        if not name or not isinstance(name, str):
+            return False
+        # 去掉 URL 上的查询参数
+        name = name.strip().split("?", 1)[0]
+        _, ext = os.path.splitext(name.lower())
+        return ext in Gemini_Images._IMAGE_EXTENSIONS
+
+    async def _resolve_reply_images(
+        self,
+        event: AstrMessageEvent,
+        reply_comp,
+    ) -> list[tuple[bytes, str]]:
+        """从引用消息中提取图片，兼容普通图片与群文件图片。
+
+        优先复用适配器已解析的引用消息链（其中的 File 组件已带可下载 URL）；
+        引用链为空时通过 get_msg 获取原始消息兜底，NapCat 群文件走 API 解析 URL。
+        """
+        urls: list[str] = []
+        file_refs: list[dict] = []
+
+        # 1) 引用消息链：适配器已解析的 Image / File 组件
+        chain = getattr(reply_comp, "chain", None) or []
+        for comp in chain:
+            if isinstance(comp, Comp.Image):
+                u = comp.url or comp.file
+                if u:
+                    urls.append(u)
+            elif isinstance(comp, Comp.File):
+                if self._is_image_file_name(comp.name) or self._is_image_file_name(
+                    comp.url
+                ):
+                    if comp.url:
+                        urls.append(comp.url)
+                    elif comp.file_ and os.path.exists(comp.file_):
+                        urls.append(comp.file_)
+
+        # 2) 引用链未提供图片时，get_msg 获取原始消息兜底
+        if not urls and not file_refs:
+            try:
                 mid = reply_comp.id
                 if not isinstance(mid, int):
                     try:
                         mid = int(str(mid).strip())
                     except (TypeError, ValueError):
                         mid = None
-                if mid is None:
-                    return images_data
-
-                resp = await event.bot.api.call_action("get_msg", message_id=mid)
-                reply_urls = self._extract_image_urls_from_msg(resp)
-                if not reply_urls:
-                    return images_data
-
-                dl = await asyncio.gather(
-                    *[self._download_image(u) for u in reply_urls],
-                    return_exceptions=True,
-                )
-                reply_images = [r for r in dl if isinstance(r, tuple) and r]
-                # 引用图片作为图一，插入最前；附带图片按原顺序排在后面
-                images_data[0:0] = reply_images
+                if mid is not None:
+                    resp = await event.bot.api.call_action("get_msg", message_id=mid)
+                    urls, file_refs = self._extract_image_urls_from_msg(resp)
             except Exception as e:
-                logger.debug(f"get_msg 获取引用图片失败: {e}")
+                logger.debug(f"get_msg 获取引用消息失败: {e}")
 
-        return images_data
+        # 3) 群文件图片（NapCat 无 URL 的 file 段，需通过 API 解析）
+        for ref in file_refs:
+            if not self._is_image_file_name(ref.get("name")):
+                continue
+            url = await self._resolve_file_url(event, ref.get("file_id"))
+            if url:
+                urls.append(url)
+
+        if not urls:
+            return []
+
+        dl = await asyncio.gather(
+            *[self._download_image(u) for u in urls],
+            return_exceptions=True,
+        )
+        return [r for r in dl if isinstance(r, tuple) and r]
+
+    async def _resolve_file_url(
+        self,
+        event: AstrMessageEvent,
+        file_id: str | None,
+    ) -> str | None:
+        """通过 OneBot 接口将群文件/私聊文件 file_id 解析为可下载 URL。"""
+        if not file_id:
+            return None
+        params: dict = {"file_id": str(file_id)}
+        self_id = event.get_self_id() or ""
+        if self_id:
+            params["self_id"] = self_id
+
+        group_id = getattr(event.message_obj, "group_id", "") or ""
+        try:
+            if group_id:
+                ret = await event.bot.api.call_action(
+                    "get_group_file_url", group_id=int(group_id), **params
+                )
+            else:
+                ret = await event.bot.api.call_action("get_private_file_url", **params)
+            if isinstance(ret, dict):
+                for k in ("url", "file", "path"):
+                    v = ret.get(k)
+                    if isinstance(v, str) and v:
+                        return v
+        except Exception as e:
+            logger.debug(f"解析文件 URL 失败 (file_id={file_id}): {e}")
+        return None
 
     @staticmethod
-    def _extract_image_urls_from_msg(msg) -> list[str]:
-        """从 get_msg 返回内容中提取可下载的图片 URL。
+    def _extract_image_urls_from_msg(msg) -> tuple[list[str], list[dict]]:
+        """从 get_msg 返回内容中提取可下载的图片 URL 及待 API 解析的群文件段。
 
         兼容三种结构：
         - list[dict]：标准 OneBot11 segments（如 NapCat get_msg 的 message 字段）
-        - str：CQ 码（[CQ:image,file=xxx,url=http://...]）
+        - str：CQ 码（[CQ:image,file=xxx,url=http://...] / [CQ:file,...]）
         - dict：包装 message/segments/messages 字段，或直接含 data 的响应
+
+        返回 (urls, file_refs)：
+        - urls：含协议头的可下载图片 URL（image 段，或带 URL 的 file 段）
+        - file_refs：仅含 file_id、无 URL 的群文件段（NapCat 需 get_group_file_url 解析）
         仅返回含协议头的 URL，避免把本地文件名（xxx.image）当作可下载链接。
         """
 
@@ -1354,18 +1468,65 @@ class Gemini_Images(Star):
         def parse(segments) -> None:
             if isinstance(segments, list):
                 for seg in segments:
-                    if isinstance(seg, dict) and seg.get("type") == "image":
-                        if u := pick(seg.get("data", {})):
+                    if not isinstance(seg, dict):
+                        continue
+                    seg_type = seg.get("type")
+                    data = seg.get("data")
+                    if not isinstance(data, dict):
+                        data = {}
+                    if seg_type == "image":
+                        if u := pick(data):
                             urls.append(u)
+                    elif seg_type == "file":
+                        if u := pick(data):
+                            urls.append(u)
+                        else:
+                            file_id = (
+                                data.get("file_id")
+                                or data.get("file")
+                                or data.get("id")
+                            )
+                            if file_id:
+                                file_refs.append(
+                                    {
+                                        "file_id": str(file_id),
+                                        "name": data.get("file_name")
+                                        or data.get("name")
+                                        or data.get("file")
+                                        or "",
+                                    }
+                                )
             elif isinstance(segments, str):
-                for m in re.finditer(r"\[CQ:image[^\]]*\]", segments):
+                for m in re.finditer(r"\[CQ:(image|file)[^\]]*\]", segments):
+                    seg_type = m.group(1)
                     fields = dict(
                         re.findall(r"([a-zA-Z_]+)=([^,\]]*)", m.group(0))
                     )
-                    if u := pick(fields):
-                        urls.append(u)
+                    if seg_type == "image":
+                        if u := pick(fields):
+                            urls.append(u)
+                    elif seg_type == "file":
+                        if u := pick(fields):
+                            urls.append(u)
+                        else:
+                            file_id = (
+                                fields.get("file_id")
+                                or fields.get("file")
+                                or fields.get("id")
+                            )
+                            if file_id:
+                                file_refs.append(
+                                    {
+                                        "file_id": str(file_id),
+                                        "name": fields.get("file_name")
+                                        or fields.get("name")
+                                        or fields.get("file")
+                                        or "",
+                                    }
+                                )
 
         urls: list[str] = []
+        file_refs: list[dict] = []
         if isinstance(msg, dict):
             handled = False
             for key in ("message", "segments", "messages"):
@@ -1379,7 +1540,8 @@ class Gemini_Images(Star):
             parse(msg)
 
         seen: set[str] = set()
-        return [u for u in urls if not (u in seen or seen.add(u))]
+        urls = [u for u in urls if not (u in seen or seen.add(u))]
+        return urls, file_refs
 
     @staticmethod
     async def get_avatar(user_id: str) -> bytes | None:
