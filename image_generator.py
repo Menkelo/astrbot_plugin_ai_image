@@ -31,6 +31,24 @@ class ProviderConfig:
     location: str = "us-central1"
     vertex_keys: list[str] | None = None
     gemini_keys: list[str] | None = None
+    proxy: str = ""  # 可选 HTTP(S) 代理，如 http://host:port（透传自服务商配置）
+
+
+class _ProxiedSession(aiohttp.ClientSession):
+    """自动为会话内所有请求附加固定代理的 aiohttp 会话（aiohttp 代理是请求级参数）。
+
+    注意：aiohttp 的 get()/post() 直接调用内部 _request()，不经过 request()，
+    因此必须覆写 _request() 才能让代理对所有请求生效。
+    """
+
+    def __init__(self, *args, proxy=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._fixed_proxy = (proxy or "").strip() or None
+
+    async def _request(self, method, url, **kwargs):
+        if self._fixed_proxy and "proxy" not in kwargs:
+            kwargs["proxy"] = self._fixed_proxy
+        return await super()._request(method, url, **kwargs)
 
 
 def parse_gemini_models_payload(payload: dict) -> list[str]:
@@ -202,8 +220,19 @@ class AIImageGenerator:
         self._vertex_idx = max(0, int(vertex_start_idx))
         # Gemini 手动配置多 Key 轮换游标（与 Vertex 同机制）
         self._gemini_idx = max(0, int(gemini_start_idx))
+        # 按代理地址缓存的会话（不同提供商可各自走不同代理/直连）
+        self._proxied_sessions: dict[str, aiohttp.ClientSession] = {}
 
-    def _get_session(self) -> aiohttp.ClientSession:
+    def _get_session(
+        self, proxy: str | None = None
+    ) -> aiohttp.ClientSession:
+        proxy = (proxy or "").strip() or None
+        if proxy:
+            session = self._proxied_sessions.get(proxy)
+            if session is None or session.closed:
+                session = _ProxiedSession(proxy=proxy)
+                self._proxied_sessions[proxy] = session
+            return session
         if self._session is None or self._session.closed:
             # 预签名图片 URL（如 S3 accelerate）常见 301/307，
             # aiohttp 各请求方法默认 allow_redirects=True，无需额外配置
@@ -215,6 +244,10 @@ class AIImageGenerator:
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        for key in list(self._proxied_sessions):
+            s = self._proxied_sessions.pop(key)
+            if s and not s.closed:
+                await s.close()
 
     # =========================
     # Error / Response Helpers
@@ -1483,7 +1516,7 @@ class AIImageGenerator:
                 "Content-Type": "application/json",
             }
 
-            session = self._get_session()
+            session = self._get_session(config.proxy)
             async with session.post(
                 url,
                 json=payload,
@@ -1523,7 +1556,7 @@ class AIImageGenerator:
         aspect_ratio: str | None,
     ) -> tuple[list[bytes] | None, str | None]:
         try:
-            session = self._get_session()
+            session = self._get_session(config.proxy)
             headers_auth = {"Authorization": f"Bearer {config.api_key}"}
 
             final_ratio = aspect_ratio
@@ -1794,7 +1827,7 @@ class AIImageGenerator:
                 image_size,
             )
 
-            session = self._get_session()
+            session = self._get_session(config.proxy)
 
             async def _post_gemini(p: dict):
                 return await session.post(
@@ -1883,7 +1916,7 @@ class AIImageGenerator:
             )
             headers = {"Content-Type": "application/json"}
 
-            session = self._get_session()
+            session = self._get_session(config.proxy)
             async with session.post(
                 url,
                 json=payload,

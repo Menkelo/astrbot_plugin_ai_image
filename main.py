@@ -503,6 +503,7 @@ class Gemini_Images(Star):
             base_url=base_url,
             api_key=api_key,
             model=model,
+            proxy=(p_conf.get("proxy") or "").strip(),
         )
 
     def _resolve_provider_with_fallback(self, slot: SlotConfig) -> ProviderConfig | None:
