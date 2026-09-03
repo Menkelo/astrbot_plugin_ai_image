@@ -1,6 +1,6 @@
 name: astrbot_plugin_ai_image
 display_name: Ai绘图聚合
 desc: "[aiocqhttp]多模型图像生成插件（提供商槽位+Vertex/Gemini手动双指令）"
-version: 1.7.4
+version: 1.7.5
 author: Menkelo
 repo: https://github.com/Menkelo/astrbot_plugin_ai_image
