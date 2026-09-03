@@ -454,19 +454,6 @@ class AIImageGenerator:
                 "请调整提示词，避免暴力、色情、政治或真实人物等敏感内容",
             )
 
-        # 请求已发出后连接被断开/远端关闭：任务可能已在中转站完成并扣费，
-        # 但响应没能传回。给出明确指引（去控制台捞图），且此错误不自动重试
-        if re.search(
-            r"server disconnected|remote end closed connection"
-            r"|connection closed without response|response.*not.*received",
-            err_str,
-            re.IGNORECASE,
-        ):
-            return (
-                "响应连接中断，生成结果可能未送达",
-                "该次请求可能已在中转站完成并扣费：请到中转站控制台查看记录并下载图片；为避免重复扣费已不自动重试，稍后可重新发送",
-            )
-
         for pattern, conclusion, advice in self.ERROR_RULES:
             if re.search(pattern, err_str, re.IGNORECASE):
                 return conclusion, advice
@@ -1280,10 +1267,7 @@ class AIImageGenerator:
     def _is_non_retryable(self, error: str | None) -> bool:
         """根据错误信息判断是否为不可重试的错误。
 
-        包括 4xx 客户端错误、内容被安全策略拦截（重试同样会被拦），
-        以及请求已发出后连接被断开/远端关闭（Server disconnected 等）——
-        这类情况任务可能已在服务端完成并计费，立即重试只会重复扣费，
-        且大概率仍撞在同一段故障窗口内（实测三次重试全部被掐）。
+        包括 4xx 客户端错误，以及内容被安全策略拦截（重试同样会被拦）。
         """
         if not error:
             return False
@@ -1294,20 +1278,7 @@ class AIImageGenerator:
         if self._is_content_block(err):
             return True
         m = re.search(r"\bAPI\s+(\d{3})\b", err)
-        if m and m.group(1) in self.NON_RETRYABLE_CODES:
-            return True
-        # 请求已发出后才断连（aiohttp: "Server disconnected"、
-        # "Remote end closed connection without response" 等）：
-        # 服务端可能已收到并完成生成（中转站控制台会显示成功并计费），
-        # 但响应没能传回。立即重试 = 再发一次新任务、再扣一次费。
-        if re.search(
-            r"server disconnected|remote end closed connection"
-            r"|connection closed without response|response.*not.*received",
-            err,
-            re.IGNORECASE,
-        ):
-            return True
-        return False
+        return bool(m and m.group(1) in self.NON_RETRYABLE_CODES)
 
     def _gemini_block_reason(self, data: object | None) -> str | None:
         """从 Gemini/Vertex 响应中提取内容安全拦截原因（无则返回 None）。
