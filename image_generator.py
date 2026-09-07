@@ -872,14 +872,9 @@ class AIImageGenerator:
 
         return f"{round16(w)}x{round16(h)}"
 
-    def _openai_size_from_reference(
-        self,
-        images_data: list[tuple[bytes, str]],
-    ) -> str | None:
-        """按第一张参考图的原始像素构造 gpt-image size。"""
+    def _reference_size(self, images_data: list[tuple[bytes, str]]) -> tuple[int, int] | None:
         if not images_data:
             return None
-
         try:
             img_bytes, _ = images_data[0]
             with Image.open(BytesIO(img_bytes)) as img:
@@ -887,9 +882,71 @@ class AIImageGenerator:
                 w, h = img.size
             if w < 1 or h < 1:
                 return None
-            return self._align_openai_wh(w, h)
+            return w, h
         except Exception:
             return None
+
+    def _sync_match_reference_frame(self, image_data: bytes, ref_data: bytes) -> bytes:
+        """把生成图裁到参考图比例，再缩放到参考图像素。"""
+        try:
+            ref = ImageOps.exif_transpose(Image.open(BytesIO(ref_data)))
+            rw, rh = ref.size
+            if rw < 1 or rh < 1:
+                return image_data
+
+            img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
+            w, h = img.size
+            if w < 1 or h < 1:
+                return image_data
+
+            dst_ratio = rw / rh
+            src_ratio = w / h
+            if abs(src_ratio - dst_ratio) > 1e-3:
+                if src_ratio > dst_ratio:
+                    new_w = max(1, int(round(h * dst_ratio)))
+                    x1 = max(0, (w - new_w) // 2)
+                    img = img.crop((x1, 0, x1 + new_w, h))
+                else:
+                    new_h = max(1, int(round(w / dst_ratio)))
+                    y1 = max(0, (h - new_h) // 2)
+                    img = img.crop((0, y1, w, y1 + new_h))
+
+            if img.size != (rw, rh):
+                img = img.resize((rw, rh), Image.LANCZOS)
+
+            out = BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue()
+        except Exception:
+            return image_data
+
+    async def _match_images_to_reference(
+        self,
+        images: list[bytes],
+        ref_data: bytes,
+    ) -> list[bytes]:
+        if not images or not ref_data:
+            return images
+        matched: list[bytes] = []
+        for b in images:
+            try:
+                nb = await asyncio.to_thread(
+                    self._sync_match_reference_frame, b, ref_data
+                )
+                matched.append(nb)
+            except Exception:
+                matched.append(b)
+        return matched
+
+    def _openai_size_from_reference(
+        self,
+        images_data: list[tuple[bytes, str]],
+    ) -> str | None:
+        """按第一张参考图的原始像素构造 gpt-image size。"""
+        wh = self._reference_size(images_data)
+        if not wh:
+            return None
+        return self._align_openai_wh(*wh)
 
     def _sync_enforce_resolution(
         self,
@@ -1223,13 +1280,17 @@ class AIImageGenerator:
                     )
 
                 if images:
-                    # 比例兜底：无论文生图/图生图、模型是否遵守 aspectRatio，
-                    # 统一裁剪到目标比例，保证比例始终生效
+                    # 用户指定了离散比例才强制裁切；未指定则按参考图原比例回裁
                     if aspect_ratio:
                         images = await self._post_fix_images_ratio(
                             images,
                             aspect_ratio,
                             mode="crop",
+                        )
+                    elif converted_images:
+                        images = await self._match_images_to_reference(
+                            images,
+                            converted_images[0][0],
                         )
                     # 分辨率落地：模型未按 imageSize 达到目标时，放大到目标长边
                     images = await self._enforce_resolution(
@@ -1361,6 +1422,11 @@ class AIImageGenerator:
                 )
             elif images_data:
                 size = self._openai_size_from_reference(images_data)
+                prompt = (
+                    "Keep the original image composition, layout, and aspect ratio. "
+                    "Only apply the requested change. Do not crop or reframe.\n"
+                    f"{prompt}"
+                )
             else:
                 size = self._build_openai_size(image_size, None)
 
@@ -1424,13 +1490,15 @@ class AIImageGenerator:
 
             url = f"{config.base_url}/images/edits"
 
-            async def _post_edits(include_size: bool):
+            async def _post_edits(size_value: str | None, fidelity: bool):
                 form = aiohttp.FormData()
                 form.add_field("model", config.model)
                 form.add_field("prompt", prompt)
 
-                if include_size and size:
-                    form.add_field("size", size)
+                if size_value:
+                    form.add_field("size", size_value)
+                if fidelity:
+                    form.add_field("input_fidelity", "high")
 
                 for idx, (img_bytes, mime) in enumerate(images_data):
                     ext = "png" if "png" in mime else "jpg"
@@ -1448,18 +1516,18 @@ class AIImageGenerator:
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 )
 
-            response = await _post_edits(True)
-            if response.status == 400 and size:
-                # size 不被当前端点支持时去掉重试（auto），由本地长边放大兜底
+            response = await _post_edits(size, True)
+            if response.status == 400:
                 body = await response.text()
                 response.close()
-
-                # 内容审核类 400 与 size 无关，去掉也会被拒，直接返回
                 err = f"API {response.status}: {body[:300]}"
                 if self._is_content_block(err):
                     return None, err
-
-                response = await _post_edits(False)
+                # 任意像素 / input_fidelity 不被当前端点支持时，改用 auto 再试
+                logger.info(
+                    f"OpenAI images edits 400，改用 size=auto 重试: {body[:200]}"
+                )
+                response = await _post_edits("auto", False)
             async with response:
                 if response.status != 200:
                     body = await response.text()
