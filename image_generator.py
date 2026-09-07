@@ -776,6 +776,86 @@ class AIImageGenerator:
 
         return padded
 
+    def _sync_pad_to_square(self, image_data: bytes) -> tuple[bytes, int, int]:
+        """把参考图居中铺到正方形白底上，返回 (png, 原宽, 原高)。"""
+        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
+        w, h = img.size
+        if w < 1 or h < 1:
+            return image_data, w, h
+        if w == h:
+            out = BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue(), w, h
+
+        side = max(w, h)
+        canvas = Image.new("RGBA", (side, side), (255, 255, 255, 255))
+        canvas.paste(img, ((side - w) // 2, (side - h) // 2), img)
+        out = BytesIO()
+        canvas.save(out, format="PNG")
+        return out.getvalue(), w, h
+
+    def _sync_crop_square_to_frame(
+        self, image_data: bytes, orig_w: int, orig_h: int
+    ) -> bytes:
+        """从正方形生成图里裁回参考图比例。"""
+        if orig_w < 1 or orig_h < 1:
+            return image_data
+        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
+        w, h = img.size
+        if w < 1 or h < 1:
+            return image_data
+
+        dst_ratio = orig_w / orig_h
+        src_ratio = w / h
+        if abs(src_ratio - dst_ratio) > 1e-3:
+            if src_ratio > dst_ratio:
+                new_w = max(1, int(round(h * dst_ratio)))
+                x1 = max(0, (w - new_w) // 2)
+                img = img.crop((x1, 0, min(x1 + new_w, w), h))
+            else:
+                new_h = max(1, int(round(w / dst_ratio)))
+                y1 = max(0, (h - new_h) // 2)
+                img = img.crop((0, y1, w, min(y1 + new_h, h)))
+
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+
+    async def _pad_images_to_square(
+        self, images_data: list[tuple[bytes, str]]
+    ) -> tuple[list[tuple[bytes, str]], tuple[int, int] | None]:
+        if not images_data:
+            return images_data, None
+        padded: list[tuple[bytes, str]] = []
+        orig_wh: tuple[int, int] | None = None
+        for idx, (img_bytes, _mime) in enumerate(images_data):
+            try:
+                b, ow, oh = await asyncio.to_thread(
+                    self._sync_pad_to_square, img_bytes
+                )
+                padded.append((b, "image/png"))
+                if idx == 0:
+                    orig_wh = (ow, oh)
+            except Exception:
+                padded.append((img_bytes, _mime))
+        return padded, orig_wh
+
+    async def _crop_images_to_frame(
+        self, images: list[bytes], orig_wh: tuple[int, int] | None
+    ) -> list[bytes]:
+        if not images or not orig_wh:
+            return images
+        cropped: list[bytes] = []
+        for b in images:
+            try:
+                nb = await asyncio.to_thread(
+                    self._sync_crop_square_to_frame, b, orig_wh[0], orig_wh[1]
+                )
+                cropped.append(nb)
+            except Exception:
+                cropped.append(b)
+        return cropped
+
     def _sync_fit_output_to_ratio(
         self,
         image_data: bytes,
@@ -1318,12 +1398,13 @@ class AIImageGenerator:
                     prompt, aspect_ratio, images_data
                 )
             elif images_data:
-                # 中转站常忽略自定义 WIDTHxHEIGHT，落到 9:16。
-                # auto 让接口按参考图决定画幅，比硬传像素更稳。
-                size = "auto"
+                # 中转站常把 size 锁成 1:1。先把参考图补成正方形再生成，
+                # 生成后再裁回原图比例，避免内容被切掉。
+                size = self._build_openai_size(image_size, "1:1")
                 prompt = (
-                    "Keep the original image composition, layout, and aspect ratio. "
-                    "Only apply the requested change. Do not crop or reframe.\n"
+                    "The input is a screenshot centered on a white square canvas. "
+                    "Keep the screenshot unchanged except for the requested edit. "
+                    "Do not crop, reframe, or fill the white padding with new content.\n"
                     f"{prompt}"
                 )
             else:
@@ -1381,10 +1462,17 @@ class AIImageGenerator:
 
                     return self._no_image_error(data)
 
+            orig_wh: tuple[int, int] | None = None
             if aspect_ratio:
                 images_data = await self._pad_images_to_ratio_if_needed(
                     images_data,
                     aspect_ratio,
+                )
+            else:
+                images_data, orig_wh = await self._pad_images_to_square(images_data)
+                logger.info(
+                    f"OpenAI images edits 未指定比例，参考图已补成 1:1 再生成"
+                    + (f"（原图 {orig_wh[0]}x{orig_wh[1]}）" if orig_wh else "")
                 )
 
             url = f"{config.base_url}/images/edits"
@@ -1433,6 +1521,8 @@ class AIImageGenerator:
 
                 images, data, parse_error = await self._extract_images_from_response(response)
                 if images:
+                    if orig_wh:
+                        images = await self._crop_images_to_frame(images, orig_wh)
                     return images, None
 
                 if parse_error:
