@@ -1,10 +1,10 @@
 {
   "api_config": {
-    "description": "提供商配置（单槽位）",
+    "description": "提供商配置（主接口 + 备用接口）",
     "type": "object",
     "items": {
       "provider_1": {
-        "description": "提供商（默认）",
+        "description": "主提供商",
         "type": "object",
         "items": {
           "id": {
@@ -25,13 +25,19 @@
             "type": "string",
             "default": "1K",
             "options": ["1K", "2K", "4K"]
-          },
-          "default_aspect_ratio": {
-            "description": "默认比例",
-            "hint": "自动: 不指定（图生图时按参考图比例）",
+          }
+        }
+      },
+      "provider_backup": {
+        "description": "备用提供商",
+        "type": "object",
+        "items": {
+          "id": {
+            "description": "提供商ID",
+            "hint": "主提供商失败一次后立即请求此接口；400/413/415/422 不切换",
             "type": "string",
-            "default": "自动",
-            "options": ["自动", "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+            "default": "",
+            "_special": "select_provider"
           }
         }
       }
@@ -205,18 +211,6 @@
         "hint": "用户上传的参考图片最大允许大小",
         "type": "int",
         "default": 10
-      },
-      "max_retries": {
-        "description": "失败重试次数",
-        "hint": "生成失败时的总尝试次数（含首次），最小为 1",
-        "type": "int",
-        "default": 3
-      },
-      "retry_interval": {
-        "description": "重试间隔（秒）",
-        "hint": "每次重试之间的等待秒数",
-        "type": "int",
-        "default": 1
       }
     }
   },

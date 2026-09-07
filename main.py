@@ -30,7 +30,6 @@ class SlotConfig:
     provider_id: str
     provider: ProviderConfig | None
     default_resolution: str
-    default_aspect_ratio: str
 
 
 class Gemini_Images(Star):
@@ -224,8 +223,6 @@ class Gemini_Images(Star):
 
         self.timeout = int(gen_config.get("timeout", 180))
         self.max_image_size_mb = int(gen_config.get("max_image_size_mb", 10))
-        self.max_retries = max(1, int(gen_config.get("max_retries", 3)))
-        self.retry_interval = max(0, int(gen_config.get("retry_interval", 1)))
 
         self.perm_mode = perm_conf.get("mode", "disable")
         self.perm_users = set(perm_conf.get("users", []))
@@ -327,8 +324,24 @@ class Gemini_Images(Star):
         )
 
         p1 = api_config.get("provider_1", {}) or {}
+        p_backup = api_config.get("provider_backup", {}) or {}
 
         p1_id = self._extract_provider_id(p1.get("id")) or legacy_main
+        self.backup_provider_id = self._extract_provider_id(p_backup.get("id"))
+        self.backup_provider = (
+            self._parse_provider(self.backup_provider_id)
+            if self.backup_provider_id
+            else None
+        )
+        if self.backup_provider:
+            logger.info(
+                f"[provider_backup] 备用提供商={self.backup_provider.name}, "
+                f"类型={self.backup_provider.api_type}, 模型={self.backup_provider.model}"
+            )
+        elif self.backup_provider_id:
+            logger.warning(
+                f"[provider_backup] 提供商ID={self.backup_provider_id}, 未解析到可用提供商"
+            )
 
         self.slots: list[SlotConfig] = [
             SlotConfig(
@@ -337,7 +350,6 @@ class Gemini_Images(Star):
                 provider_id=p1_id,
                 provider=self._parse_provider(p1_id),
                 default_resolution=(p1.get("default_resolution", "1K") or "1K").strip(),
-                default_aspect_ratio=(p1.get("default_aspect_ratio", "自动") or "自动").strip(),
             ),
         ]
 
@@ -377,7 +389,6 @@ class Gemini_Images(Star):
                     provider_id="__manual_vertex_1__",
                     provider=vertex_provider_1,
                     default_resolution=self.vertex_1_default_resolution,
-                    default_aspect_ratio="自动",
                 )
             )
 
@@ -388,7 +399,6 @@ class Gemini_Images(Star):
                     provider_id="__manual_vertex_2__",
                     provider=vertex_provider_2,
                     default_resolution=self.vertex_2_default_resolution,
-                    default_aspect_ratio="自动",
                 )
             )
 
@@ -424,7 +434,6 @@ class Gemini_Images(Star):
                     provider_id="__manual_gemini_1__",
                     provider=gemini_provider_1,
                     default_resolution=self.gemini_1_default_resolution,
-                    default_aspect_ratio="自动",
                 )
             )
 
@@ -435,7 +444,6 @@ class Gemini_Images(Star):
                     provider_id="__manual_gemini_2__",
                     provider=gemini_provider_2,
                     default_resolution=self.gemini_2_default_resolution,
-                    default_aspect_ratio="自动",
                 )
             )
 
@@ -535,6 +543,16 @@ class Gemini_Images(Star):
         except Exception:
             pass
 
+        return None
+
+    def _resolve_backup_provider(self) -> ProviderConfig | None:
+        if self.backup_provider:
+            return self.backup_provider
+        if self.backup_provider_id:
+            p = self._parse_provider(self.backup_provider_id)
+            if p:
+                self.backup_provider = p
+                return p
         return None
 
     # =========================
@@ -1198,11 +1216,8 @@ class Gemini_Images(Star):
         clean_preset_text, preset_ratio = self._extract_ratio(raw_preset_text)
         clean_extra_text, extra_ratio = self._extract_ratio(raw_extra_text)
 
-        # 比例优先级：指令内嵌 > 预设指定 > 槽位配置默认比例（"自动"则不指定）
-        slot_ratio = (slot.default_aspect_ratio or "自动").strip()
-        if slot_ratio == "自动":
-            slot_ratio = None
-        final_ratio = extra_ratio or preset_ratio or slot_ratio
+        # 比例优先级：指令内嵌 > 预设指定（未指定则图生图按参考图推断）
+        final_ratio = extra_ratio or preset_ratio
 
         # 分辨率关键词（1K/2K/4K）对所有提供商统一解析，
         # 不再局限于 Vertex 渠道（原生 imageSize + 生成后落地保证生效）。
@@ -1256,6 +1271,10 @@ class Gemini_Images(Star):
             else None
         )
 
+        backup_provider = (
+            self._resolve_backup_provider() if slot.slot_name == "provider_1" else None
+        )
+
         self.create_background_task(
             self._generate_and_send_image_async(
                 prompt=final_prompt,
@@ -1268,6 +1287,7 @@ class Gemini_Images(Star):
                 reply_id=reply_id,
                 user_id=user_id,
                 quota_consumed=quota_consumed,
+                backup_provider=backup_provider,
             )
         )
 
@@ -1638,6 +1658,7 @@ class Gemini_Images(Star):
         reply_id: str | None = None,
         user_id: str = "",
         quota_consumed: bool = False,
+        backup_provider: ProviderConfig | None = None,
     ):
         if not task_id:
             task_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
@@ -1661,10 +1682,9 @@ class Gemini_Images(Star):
             main_config=provider,
             timeout=self.timeout,
             session=self._get_http_session(),
-            max_retries=self.max_retries,
-            retry_delay=self.retry_interval,
             vertex_start_idx=vertex_start,
             gemini_start_idx=gemini_start,
+            backup_config=backup_provider,
         )
 
         success = False

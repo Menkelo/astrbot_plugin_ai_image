@@ -1,6 +1,6 @@
 """
 AI Image Generation Module
-封装 Gemini/OpenAI/Vertex AI 多 API 图像生成功能（单提供商，失败重试）
+封装 Gemini/OpenAI/Vertex AI 多 API 图像生成功能（主提供商失败一次后切备用）
 """
 
 from __future__ import annotations
@@ -180,13 +180,13 @@ class AIImageGenerator:
     }
 
     # 这些 HTTP 状态码属于请求本身的问题（参数/鉴权/内容策略等），
-    # 重试同样的请求不会成功，遇到时直接停止重试以节省超时等待。
+    # 切备用提供商同样不会成功，遇到时直接返回错误。
     NON_RETRYABLE_CODES: frozenset[str] = frozenset(
-        {"400", "401", "403", "404", "413", "415", "422"}
+        {"400", "413", "415", "422"}
     )
 
     # Gemini/Vertex 返回 200 但因内容安全策略未产出图片时的 finishReason，
-    # 属于内容被拦截，重试同样会被拦，故视为不可重试。
+    # 属于内容被拦截，切备用同样会被拦，故直接返回错误。
     GEMINI_BLOCK_REASONS: frozenset[str] = frozenset(
         {
             "SAFETY",
@@ -204,18 +204,16 @@ class AIImageGenerator:
         main_config: ProviderConfig | None,
         timeout: int = 120,
         session: aiohttp.ClientSession | None = None,
-        max_retries: int = 3,
-        retry_delay: float = 1,
         vertex_start_idx: int = 0,
         gemini_start_idx: int = 0,
+        backup_config: ProviderConfig | None = None,
     ):
         self.main_config = main_config
+        self.backup_config = backup_config
         self.timeout = timeout
         self._session = session
         # 仅当会话由本实例创建时才负责关闭；注入的共享会话不在此关闭
         self._owns_session = session is None
-        self.max_retries = max(1, int(max_retries))
-        self.retry_delay = max(0, float(retry_delay))
         # 由调用方传入起始 Key 索引，实现 Vertex 多 Key 跨请求轮换
         self._vertex_idx = max(0, int(vertex_start_idx))
         # Gemini 手动配置多 Key 轮换游标（与 Vertex 同机制）
@@ -291,7 +289,7 @@ class AIImageGenerator:
             r"rate.?limit|RATE_LIMITED|too many requests"
             r"|请求过于频繁|请求太频繁|请求频率",
             "请求过于频繁，被限流",
-            "请等待 30 秒后重试；若多人同时使用，可在配置面板调低重试次数",
+            "请等待 30 秒后再试；若多人同时使用，可配置备用提供商分流",
         ),
         (
             r"model\s*['\"]?[^\s'\"]+['\"]?\s+(not found|does not exist)"
@@ -518,7 +516,7 @@ class AIImageGenerator:
 
         响应体摘要必须一并带回：不少中转站会以 HTTP 200 返回内容审核提示
         （图片位置换成一段说明文字），若在此处丢弃摘要，上层分类器只能看到
-        「API 未返回图片」，既无法给出正确结论，也会把必然失败的请求重试三次。
+        「API 未返回图片」，既无法给出正确结论，也会把必然失败的请求切到备用提供商。
         """
         if data is None:
             return None, "API 未返回图片"
@@ -1259,22 +1257,22 @@ class AIImageGenerator:
     def _is_content_block(self, error: str | None) -> bool:
         """判断错误是否属于内容审核拦截。
 
-        这类请求换参数重发、或原样重试都必然再次被拒，调用方据此跳过重试。
+        这类请求切备用提供商同样会被拒，调用方据此直接返回错误。
         """
         classified = self._classify_error(error)
         return bool(classified and "安全策略拦截" in classified[0])
 
     def _is_non_retryable(self, error: str | None) -> bool:
-        """根据错误信息判断是否为不可重试的错误。
+        """根据错误信息判断是否为不可切换备用提供商的错误。
 
-        包括 4xx 客户端错误，以及内容被安全策略拦截（重试同样会被拦）。
+        包括 4xx 客户端错误，以及内容被安全策略拦截（切备用同样会被拦）。
         """
         if not error:
             return False
         err = str(error)
-        # 内容被拦截时重试同样会被拦。由统一分类器判定，这样各中转站的
+        # 内容被拦截时切备用同样会被拦。由统一分类器判定，这样各中转站的
         # 英文拦截文案（如 "filtered out ... Prohibited Use policy"）即使
-        # 挂在可重试的状态码上，也不会白白重试三次
+        # 挂在其他状态码上，也不会切到备用提供商
         if self._is_content_block(err):
             return True
         m = re.search(r"\bAPI\s+(\d{3})\b", err)
@@ -1391,12 +1389,16 @@ class AIImageGenerator:
                 aspect_ratio = inferred
                 logger.info(f"{prefix}未指定比例，根据参考图推断: {aspect_ratio}")
 
-        retry_queue: list[ProviderConfig] = [self.main_config] * self.max_retries
+        providers: list[ProviderConfig] = [self.main_config]
+        if self.backup_config:
+            providers.append(self.backup_config)
+
         last_error = "API 请求失败"
 
-        for i, provider in enumerate(retry_queue):
+        for i, provider in enumerate(providers):
+            role = "主提供商" if i == 0 else "备用提供商"
             logger.info(
-                f"{prefix}尝试第 {i + 1}/{len(retry_queue)} 次生成 "
+                f"{prefix}请求{role} "
                 f"(提供商: {provider.name}, 模型: {provider.model}, 类型: {provider.api_type})"
             )
 
@@ -1447,12 +1449,12 @@ class AIImageGenerator:
 
                 last_error = self._format_user_error(error)
                 logger.warning(
-                    f"{prefix}生成失败: {last_error}\n原始错误: {error}"
+                    f"{prefix}{role}生成失败: {last_error}\n原始错误: {error}"
                 )
 
                 if self._is_non_retryable(error):
                     logger.info(
-                        f"{prefix}错误不可重试（{last_error}），停止重试"
+                        f"{prefix}错误不可切换备用（{last_error}），直接返回"
                     )
                     return None, last_error
 
@@ -1460,16 +1462,14 @@ class AIImageGenerator:
                 logger.error(f"{prefix}异常: {e}\n{traceback.format_exc()}")
                 last_error = self._format_user_error(str(e))
 
-                # 异常路径同样要判定可重试性，否则内容拦截等必然失败的情况
-                # 会在这里被无条件重试
                 if self._is_non_retryable(str(e)):
                     logger.info(
-                        f"{prefix}错误不可重试（{last_error}），停止重试"
+                        f"{prefix}错误不可切换备用（{last_error}），直接返回"
                     )
                     return None, last_error
 
-            if i < len(retry_queue) - 1:
-                await asyncio.sleep(self.retry_delay)
+            if i == 0 and self.backup_config:
+                logger.info(f"{prefix}主提供商失败，立即请求备用提供商")
 
         return None, last_error
 
