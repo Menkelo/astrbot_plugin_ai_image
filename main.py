@@ -228,14 +228,14 @@ class Gemini_Images(Star):
         self.perm_users = set(perm_conf.get("users", []))
         self.perm_groups = set(perm_conf.get("groups", []))
         self.perm_no_permission_reply = perm_conf.get(
-            "no_permission_reply", "❌ 您没有权限使用此功能"
+            "no_permission_reply", "❌您没有权限使用此功能"
         )
         self.perm_silent = perm_conf.get("silent_on_no_permission", False)
 
         self.enable_daily_quota = bool(quota_conf.get("enable_daily_quota", True))
         self.daily_free_count = int(quota_conf.get("daily_free_count", 5))
         self.quota_exceeded_reply = quota_conf.get(
-            "quota_exceeded_reply", "❌ 今日免费生图次数已用完，请明天再试。"
+            "quota_exceeded_reply", "❌今日免费生图次数已用完，请明天再试"
         )
 
         # Vertex manual common config
@@ -1158,7 +1158,7 @@ class Gemini_Images(Star):
 
         provider = self._resolve_provider_with_fallback(slot)
         if not provider:
-            yield event.plain_result(f"❌ 命令 /{slot.command} 未配置可用提供商。")
+            yield event.plain_result("❌生成失败：命令未配置可用提供商")
             return
 
         # Gemini 渠道 model 留空/auto 时，从 ListModels 自动选型
@@ -1167,9 +1167,7 @@ class Gemini_Images(Star):
         ):
             provider = await self._resolve_gemini_auto_model(slot, provider)
             if not provider:
-                yield event.plain_result(
-                    "❌ 自动获取模型失败，请在配置面板手动填写模型名。"
-                )
+                yield event.plain_result("❌生成失败：自动获取模型失败")
                 return
 
         ok, remain = await self._check_and_consume_quota(
@@ -1201,7 +1199,7 @@ class Gemini_Images(Star):
         ) = self._resolve_preset(full_text)
 
         if not raw_preset_text and not raw_extra_text:
-            yield event.plain_result("❌ 请提供图片生成的提示词或预设名称！")
+            yield event.plain_result("❌生成失败：请提供图片生成的提示词或预设名称")
             return
 
         images_data = await self._fetch_images_from_event(event)
@@ -1699,7 +1697,7 @@ class Gemini_Images(Star):
             )
 
             if error:
-                await self._reply_error(event, f"❌ 生成失败: {error}")
+                await self._reply_error(event, f"❌生成失败：{error}")
                 return
 
             if not results:
@@ -1725,7 +1723,7 @@ class Gemini_Images(Star):
 
         except Exception as e:
             logger.error(f"任务失败: {e}", exc_info=True)
-            await self._reply_error(event, "❌ 生成过程中发生未知错误")
+            await self._reply_error(event, "❌生成失败：生成过程中发生未知错误")
         finally:
             # 共享会话由插件统一管理，这里只关闭生成器自建的会话（若有）
             await generator.close_session()

@@ -112,7 +112,7 @@
 | `mode` | string | `”disable”` | 权限模式<br>`disable`：不启用<br>`blacklist`：黑名单模式<br>`whitelist`：白名单模式 |
 | `users` | list | `[]` | 用户黑/白名单列表（填入用户 ID，如 QQ 号）<br>白名单模式下，机器人管理员自动视为白名单，无需手动填入 |
 | `groups` | list | `[]` | 群组黑/白名单列表（填入群组 ID） |
-| `no_permission_reply` | string | `”❌ 您没有权限使用此功能”` | 无权限时的回复内容 |
+| `no_permission_reply` | string | `”❌您没有权限使用此功能”` | 无权限时的回复内容 |
 | `silent_on_no_permission` | bool | `false` | 无权限时是否静默（不回复） |
 
 #### quota_config（免费次数配置）
@@ -121,7 +121,7 @@
 | --- | --- | --- | --- |
 | `enable_daily_quota` | bool | `true` | 启用每日免费次数限制 |
 | `daily_free_count` | int | `3` | 每人每日免费次数（00:00 自动重置） |
-| `quota_exceeded_reply` | string | `”❌ 今日免费生图次数已用完，请明天再试。”` | 次数用尽时的回复内容 |
+| `quota_exceeded_reply` | string | `”❌今日免费生图次数已用完，请明天再试”` | 次数用尽时的回复内容 |
 
 > **注意事项：**
 > - 机器人管理员（AstrBot 全局配置中的管理员）自动等同白名单用户，无需手动将其 QQ 添加到 `permission_config.users`。

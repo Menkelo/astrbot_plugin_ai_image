@@ -240,7 +240,7 @@
       "no_permission_reply": {
         "description": "无权限回复语",
         "type": "string",
-        "default": "❌ 您没有权限使用此功能",
+        "default": "❌您没有权限使用此功能",
         "hint": "当用户没有权限时回复的内容"
       },
       "silent_on_no_permission": {
@@ -270,7 +270,7 @@
       "quota_exceeded_reply": {
         "description": "次数用尽回复语",
         "type": "string",
-        "default": "❌ 今日免费生图次数已用完，请明天再试。",
+        "default": "❌今日免费生图次数已用完，请明天再试",
         "hint": "当用户超过当日免费次数时的回复"
       }
     }
