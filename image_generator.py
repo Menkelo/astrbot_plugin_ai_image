@@ -850,104 +850,6 @@ class AIImageGenerator:
 
         return fixed
 
-    def _align_openai_wh(self, w: int, h: int) -> str:
-        """把宽高对齐到 gpt-image 约束：16 的倍数、比例 1:3~3:1、长边不超过 3840。"""
-        if w < 1 or h < 1:
-            return "1024x1024"
-
-        r = w / h
-        if r > 3:
-            w = int(round(h * 3))
-        elif r < 1 / 3:
-            h = int(round(w * 3))
-
-        long_edge = max(w, h)
-        if long_edge > 3840:
-            scale = 3840 / long_edge
-            w = int(round(w * scale))
-            h = int(round(h * scale))
-
-        def round16(x: int) -> int:
-            return max(16, int(round(x / 16.0) * 16))
-
-        return f"{round16(w)}x{round16(h)}"
-
-    def _reference_size(self, images_data: list[tuple[bytes, str]]) -> tuple[int, int] | None:
-        if not images_data:
-            return None
-        try:
-            img_bytes, _ = images_data[0]
-            with Image.open(BytesIO(img_bytes)) as img:
-                img = ImageOps.exif_transpose(img)
-                w, h = img.size
-            if w < 1 or h < 1:
-                return None
-            return w, h
-        except Exception:
-            return None
-
-    def _sync_match_reference_frame(self, image_data: bytes, ref_data: bytes) -> bytes:
-        """把生成图裁到参考图比例，再缩放到参考图像素。"""
-        try:
-            ref = ImageOps.exif_transpose(Image.open(BytesIO(ref_data)))
-            rw, rh = ref.size
-            if rw < 1 or rh < 1:
-                return image_data
-
-            img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
-            w, h = img.size
-            if w < 1 or h < 1:
-                return image_data
-
-            dst_ratio = rw / rh
-            src_ratio = w / h
-            if abs(src_ratio - dst_ratio) > 1e-3:
-                if src_ratio > dst_ratio:
-                    new_w = max(1, int(round(h * dst_ratio)))
-                    x1 = max(0, (w - new_w) // 2)
-                    img = img.crop((x1, 0, x1 + new_w, h))
-                else:
-                    new_h = max(1, int(round(w / dst_ratio)))
-                    y1 = max(0, (h - new_h) // 2)
-                    img = img.crop((0, y1, w, y1 + new_h))
-
-            if img.size != (rw, rh):
-                img = img.resize((rw, rh), Image.LANCZOS)
-
-            out = BytesIO()
-            img.save(out, format="PNG")
-            return out.getvalue()
-        except Exception:
-            return image_data
-
-    async def _match_images_to_reference(
-        self,
-        images: list[bytes],
-        ref_data: bytes,
-    ) -> list[bytes]:
-        if not images or not ref_data:
-            return images
-        matched: list[bytes] = []
-        for b in images:
-            try:
-                nb = await asyncio.to_thread(
-                    self._sync_match_reference_frame, b, ref_data
-                )
-                matched.append(nb)
-            except Exception:
-                matched.append(b)
-        return matched
-
-    def _openai_size_from_reference(
-        self,
-        images_data: list[tuple[bytes, str]],
-    ) -> str | None:
-        """按第一张参考图的原始像素构造 gpt-image size。"""
-        wh = self._reference_size(images_data)
-        if not wh:
-            return None
-        return self._align_openai_wh(*wh)
-
     def _sync_enforce_resolution(
         self,
         image_data: bytes,
@@ -1287,11 +1189,6 @@ class AIImageGenerator:
                             aspect_ratio,
                             mode="crop",
                         )
-                    elif converted_images:
-                        images = await self._match_images_to_reference(
-                            images,
-                            converted_images[0][0],
-                        )
                     # 分辨率落地：模型未按 imageSize 达到目标时，放大到目标长边
                     images = await self._enforce_resolution(
                         images,
@@ -1421,7 +1318,9 @@ class AIImageGenerator:
                     prompt, aspect_ratio, images_data
                 )
             elif images_data:
-                size = self._openai_size_from_reference(images_data)
+                # 中转站常忽略自定义 WIDTHxHEIGHT，落到 9:16。
+                # auto 让接口按参考图决定画幅，比硬传像素更稳。
+                size = "auto"
                 prompt = (
                     "Keep the original image composition, layout, and aspect ratio. "
                     "Only apply the requested change. Do not crop or reframe.\n"
@@ -1523,11 +1422,10 @@ class AIImageGenerator:
                 err = f"API {response.status}: {body[:300]}"
                 if self._is_content_block(err):
                     return None, err
-                # 任意像素 / input_fidelity 不被当前端点支持时，改用 auto 再试
                 logger.info(
-                    f"OpenAI images edits 400，改用 size=auto 重试: {body[:200]}"
+                    f"OpenAI images edits 400，去掉 size/fidelity 重试: {body[:200]}"
                 )
-                response = await _post_edits("auto", False)
+                response = await _post_edits(None, False)
             async with response:
                 if response.status != 200:
                     body = await response.text()
