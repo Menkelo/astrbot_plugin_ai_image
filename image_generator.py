@@ -850,36 +850,44 @@ class AIImageGenerator:
 
         return fixed
 
-    def _infer_ratio_from_images(
+    def _align_openai_wh(self, w: int, h: int) -> str:
+        """把宽高对齐到 gpt-image 约束：16 的倍数、比例 1:3~3:1、长边不超过 3840。"""
+        if w < 1 or h < 1:
+            return "1024x1024"
+
+        r = w / h
+        if r > 3:
+            w = int(round(h * 3))
+        elif r < 1 / 3:
+            h = int(round(w * 3))
+
+        long_edge = max(w, h)
+        if long_edge > 3840:
+            scale = 3840 / long_edge
+            w = int(round(w * scale))
+            h = int(round(h * scale))
+
+        def round16(x: int) -> int:
+            return max(16, int(round(x / 16.0) * 16))
+
+        return f"{round16(w)}x{round16(h)}"
+
+    def _openai_size_from_reference(
         self,
         images_data: list[tuple[bytes, str]],
     ) -> str | None:
+        """按第一张参考图的原始像素构造 gpt-image size。"""
         if not images_data:
             return None
 
         try:
             img_bytes, _ = images_data[0]
             with Image.open(BytesIO(img_bytes)) as img:
+                img = ImageOps.exif_transpose(img)
                 w, h = img.size
-                if not w or not h:
-                    return None
-
-            r = w / h
-            candidates = {
-                k: rw / rh for k, (rw, rh) in self.RATIO_WH.items()
-            }
-
-            best_ratio = None
-            best_diff = 10**9
-
-            for k, v in candidates.items():
-                diff = abs(r - v)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_ratio = k
-
-            return best_ratio
-
+            if w < 1 or h < 1:
+                return None
+            return self._align_openai_wh(w, h)
         except Exception:
             return None
 
@@ -1170,13 +1178,10 @@ class AIImageGenerator:
                 c_data, c_mime = await self._convert_image_format(img_data, mime_type)
                 converted_images.append((c_data, c_mime))
 
-        # 图生图智能比例识别：未显式指定比例时，根据第一张参考图推断比例。
-        # 对所有提供商统一生效（原先仅 OpenAI images 路由会推断）。
+        # 图生图未指定比例：不映射到 9:21 等离散比例。
+        # GPT 按参考图像素传 size；Gemini/Vertex 不传 aspectRatio，避免生成后再裁切。
         if not aspect_ratio and converted_images:
-            inferred = self._infer_ratio_from_images(converted_images)
-            if inferred:
-                aspect_ratio = inferred
-                logger.info(f"{prefix}未指定比例，根据参考图推断: {aspect_ratio}")
+            logger.info(f"{prefix}未指定比例，图生图按参考图原始尺寸处理")
 
         providers: list[ProviderConfig] = [self.main_config]
         if self.backup_config:
@@ -1348,20 +1353,20 @@ class AIImageGenerator:
             session = self._get_session(config.proxy)
             headers_auth = {"Authorization": f"Bearer {config.api_key}"}
 
-            final_ratio = aspect_ratio
-            if not final_ratio and images_data:
-                final_ratio = self._infer_ratio_from_images(images_data)
-
-            size = self._build_openai_size(image_size, final_ratio)
-
-            if final_ratio:
+            size = None
+            if aspect_ratio:
+                size = self._build_openai_size(image_size, aspect_ratio)
                 prompt = self._augment_prompt_for_ratio(
-                    prompt, final_ratio, images_data
+                    prompt, aspect_ratio, images_data
                 )
+            elif images_data:
+                size = self._openai_size_from_reference(images_data)
+            else:
+                size = self._build_openai_size(image_size, None)
 
             logger.info(
                 f"OpenAI images route: aspect_ratio={aspect_ratio}, "
-                f"final_ratio={final_ratio}, size={size}, refs={len(images_data)}"
+                f"size={size}, refs={len(images_data)}"
             )
 
             if not images_data:
