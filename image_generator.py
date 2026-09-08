@@ -182,7 +182,7 @@ class AIImageGenerator:
     # 这些 HTTP 状态码属于请求本身的问题（参数/鉴权/内容策略等），
     # 切备用提供商同样不会成功，遇到时直接返回错误。
     NON_RETRYABLE_CODES: frozenset[str] = frozenset(
-        {"400", "413", "415", "422"}
+        {"400", "413", "415", "422", "451"}
     )
 
     # Gemini/Vertex 返回 200 但因内容安全策略未产出图片时的 finishReason，
@@ -261,6 +261,7 @@ class AIImageGenerator:
         "413": "请求体过大（413）",
         "415": "不支持的图片格式（415）",
         "422": "内容审核不通过（422）",
+        "451": "内容审核不通过（451）",
         "429": "请求过于频繁或配额已用尽（429）",
         "500": "中转站内部错误（500）",
         "502": "网关错误（502）",
@@ -794,10 +795,28 @@ class AIImageGenerator:
         canvas.save(out, format="PNG")
         return out.getvalue(), w, h
 
+    def _sync_region_is_blank(
+        self, img: Image.Image, box: tuple[int, int, int, int]
+    ) -> bool:
+        x1, y1, x2, y2 = box
+        if x2 <= x1 or y2 <= y1:
+            return True
+        region = img.crop(box).convert("RGB")
+        rw = max(1, region.width // 8)
+        rh = max(1, region.height // 8)
+        region = region.resize((rw, rh), Image.BILINEAR)
+        pixels = list(region.getdata())
+        if not pixels:
+            return True
+        near_white = sum(
+            1 for r, g, b in pixels if r >= 240 and g >= 240 and b >= 240
+        )
+        return near_white / len(pixels) >= 0.90
+
     def _sync_crop_square_to_frame(
         self, image_data: bytes, orig_w: int, orig_h: int
     ) -> bytes:
-        """从正方形生成图里裁回参考图比例。"""
+        """从正方形生成图里裁回参考图比例。补边已被填满内容时不裁。"""
         if orig_w < 1 or orig_h < 1:
             return image_data
         img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
@@ -807,15 +826,37 @@ class AIImageGenerator:
 
         dst_ratio = orig_w / orig_h
         src_ratio = w / h
-        if abs(src_ratio - dst_ratio) > 1e-3:
-            if src_ratio > dst_ratio:
-                new_w = max(1, int(round(h * dst_ratio)))
-                x1 = max(0, (w - new_w) // 2)
-                img = img.crop((x1, 0, min(x1 + new_w, w), h))
-            else:
-                new_h = max(1, int(round(w / dst_ratio)))
-                y1 = max(0, (h - new_h) // 2)
-                img = img.crop((0, y1, w, min(y1 + new_h, h)))
+        if abs(src_ratio - dst_ratio) <= 1e-3:
+            out = BytesIO()
+            img.save(out, format="PNG")
+            return out.getvalue()
+
+        if src_ratio > dst_ratio:
+            new_w = max(1, int(round(h * dst_ratio)))
+            x1 = max(0, (w - new_w) // 2)
+            x2 = min(x1 + new_w, w)
+            if not (
+                self._sync_region_is_blank(img, (0, 0, x1, h))
+                and self._sync_region_is_blank(img, (x2, 0, w, h))
+            ):
+                logger.info(
+                    f"补边已有内容，跳过回裁（{w}x{h} → {orig_w}x{orig_h}）"
+                )
+                return image_data
+            img = img.crop((x1, 0, x2, h))
+        else:
+            new_h = max(1, int(round(w / dst_ratio)))
+            y1 = max(0, (h - new_h) // 2)
+            y2 = min(y1 + new_h, h)
+            if not (
+                self._sync_region_is_blank(img, (0, 0, w, y1))
+                and self._sync_region_is_blank(img, (0, y2, w, h))
+            ):
+                logger.info(
+                    f"补边已有内容，跳过回裁（{w}x{h} → {orig_w}x{orig_h}）"
+                )
+                return image_data
+            img = img.crop((0, y1, w, y2))
 
         out = BytesIO()
         img.save(out, format="PNG")
