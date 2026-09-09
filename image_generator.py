@@ -798,6 +798,7 @@ class AIImageGenerator:
     def _sync_region_is_blank(
         self, img: Image.Image, box: tuple[int, int, int, int]
     ) -> bool:
+        """补边区域是否仍是空白：近白，或被均匀填色（如整片蓝底）。"""
         x1, y1, x2, y2 = box
         if x2 <= x1 or y2 <= y1:
             return True
@@ -808,15 +809,24 @@ class AIImageGenerator:
         pixels = list(region.getdata())
         if not pixels:
             return True
+        n = len(pixels)
+        mean_r = sum(p[0] for p in pixels) / n
+        mean_g = sum(p[1] for p in pixels) / n
+        mean_b = sum(p[2] for p in pixels) / n
+        std_r = (sum((p[0] - mean_r) ** 2 for p in pixels) / n) ** 0.5
+        std_g = (sum((p[1] - mean_g) ** 2 for p in pixels) / n) ** 0.5
+        std_b = (sum((p[2] - mean_b) ** 2 for p in pixels) / n) ** 0.5
+        if std_r < 15 and std_g < 15 and std_b < 15:
+            return True
         near_white = sum(
             1 for r, g, b in pixels if r >= 240 and g >= 240 and b >= 240
         )
-        return near_white / len(pixels) >= 0.90
+        return near_white / n >= 0.90
 
     def _sync_crop_square_to_frame(
         self, image_data: bytes, orig_w: int, orig_h: int
     ) -> bytes:
-        """从正方形生成图里裁回参考图比例。补边已被填满内容时不裁。"""
+        """从正方形生成图里裁回参考图比例。补边仍近白或均匀填色时才裁。"""
         if orig_w < 1 or orig_h < 1:
             return image_data
         img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
