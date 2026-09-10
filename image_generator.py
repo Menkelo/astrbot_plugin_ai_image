@@ -18,6 +18,22 @@ from PIL import Image, ImageOps
 
 from astrbot.api import logger
 
+from .image_geometry import (
+    gpt_image_2_size,
+    is_gpt_image_2_5,
+    legacy_gpt_image_size,
+    oriented_size,
+    pad_to_ratio,
+    ratio_label,
+    supports_custom_image_size,
+)
+
+_IMAGE_OPTION_ERRORS = {
+    "quality": "当前接口不支持所选图片质量，请改为 auto 或检查中转站支持",
+    "background": "当前接口不支持所选图片背景，请调整背景选项或检查中转站支持",
+    "output_format": "当前接口不支持 PNG 输出参数，请检查模型或中转站兼容性",
+}
+
 
 @dataclass
 class ProviderConfig:
@@ -126,8 +142,8 @@ class AIImageGenerator:
     }
 
     # gpt-image-2 等 OpenAI images 路由支持的精确分辨率映射（1K/2K/4K × 比例）。
-    # 值来自 gpt-image-2 官方 SIZE_MAPPING（16 的倍数、单边 ≤ 3840、长短边比 ≤ 3:1、
-    # 总像素 655360~8294400）。其中 9:21 为 21:9 的对称补全。
+    # 插件预设尺寸，满足 GPT Image 2 官方约束（16 的倍数、单边 ≤ 3840、
+    # 长短边比 ≤ 3:1、总像素 655360~8294400）；不是所有模型共用的官方枚举表。
     GPT_IMAGE_SIZES: dict[str, dict[str, str]] = {
         "1K": {
             "1:1": "1024x1024",
@@ -207,10 +223,20 @@ class AIImageGenerator:
         vertex_start_idx: int = 0,
         gemini_start_idx: int = 0,
         backup_config: ProviderConfig | None = None,
+        gpt_image_quality: str = "auto",
+        gpt_image_background: str = "auto",
     ):
         self.main_config = main_config
         self.backup_config = backup_config
         self.last_used_provider: ProviderConfig | None = None
+        quality = str(gpt_image_quality or "auto").strip().lower()
+        background = str(gpt_image_background or "auto").strip().lower()
+        self.gpt_image_quality = (
+            quality if quality in {"auto", "low", "medium", "high", "xhigh", "max"} else "auto"
+        )
+        self.gpt_image_background = (
+            background if background in {"auto", "opaque", "transparent"} else "auto"
+        )
         self.timeout = timeout
         self._session = session
         # 仅当会话由本实例创建时才负责关闭；注入的共享会话不在此关闭
@@ -276,6 +302,8 @@ class AIImageGenerator:
         err_str = str(error or "")
         if not err_str.strip():
             return None
+        if err_str in _IMAGE_OPTION_ERRORS.values():
+            return err_str
 
         if "安全策略拦截" in err_str:
             return err_str.strip()
@@ -625,25 +653,22 @@ class AIImageGenerator:
 
     def _sync_normalize_orientation(self, image_data: bytes) -> bytes:
         """
-        将 EXIF Orientation 应用到像素并移除方向标签，防止聊天端/浏览器
-        按 EXIF 自动旋转导致图片打横。
-        仅当 JPEG 携带非默认方向（≠1）时才重新编码，否则原样返回。
+        在读取画幅和调用模型前应用 EXIF 方向；生成结果也使用相同规则。
+        只有非默认方向才重编码为无损 PNG，其余图片保留原始字节。
         """
         try:
-            if not image_data.startswith(b"\xff\xd8"):
-                return image_data
-
-            img = Image.open(BytesIO(image_data))
-            orientation = img.getexif().get(0x0112)
-            if not orientation or orientation == 1:
-                return image_data
-
-            img = ImageOps.exif_transpose(img)
-            img.info.pop("exif", None)
-            img.info.pop("parsed_exif", None)
-            out = BytesIO()
-            img.save(out, format="JPEG", quality=95)
-            return out.getvalue()
+            with Image.open(BytesIO(image_data)) as source:
+                orientation = source.getexif().get(0x0112)
+                if orientation not in (2, 3, 4, 5, 6, 7, 8):
+                    return image_data
+                img = ImageOps.exif_transpose(source)
+                img.info.pop("exif", None)
+                img.info.pop("parsed_exif", None)
+                if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+                    img = img.convert("RGB")
+                out = BytesIO()
+                img.save(out, format="PNG")
+                return out.getvalue()
         except Exception:
             return image_data
 
@@ -676,6 +701,7 @@ class AIImageGenerator:
         image_data: bytes,
         mime_type: str,
     ) -> tuple[bytes, str]:
+        image_data = await asyncio.to_thread(self._sync_normalize_orientation, image_data)
         if image_data.startswith(b"\xff\xd8"):
             mime = "image/jpeg"
         elif image_data.startswith(b"\x89PNG"):
@@ -710,276 +736,51 @@ class AIImageGenerator:
 
         return self.RATIO_WH.get(ratio.strip())
 
-    def _sync_pad_image_to_ratio(
-        self,
-        image_data: bytes,
-        target_ratio: str,
-        out_format: str = "PNG",
-    ) -> tuple[bytes, str]:
-        wh = self._ratio_to_wh(target_ratio)
-        if not wh:
-            if image_data.startswith(b"\x89PNG"):
-                return image_data, "image/png"
-            if image_data.startswith(b"\xff\xd8"):
-                return image_data, "image/jpeg"
-            return image_data, "application/octet-stream"
-
-        rw, rh = wh
-        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
-        w, h = img.size
-
-        if w <= 0 or h <= 0:
-            return image_data, "image/png"
-
-        src_ratio = w / h
-        dst_ratio = rw / rh
-
-        if abs(src_ratio - dst_ratio) < 1e-6:
-            output = BytesIO()
-            img.save(output, format=out_format)
-            return output.getvalue(), "image/png"
-
-        if src_ratio > dst_ratio:
-            new_w = w
-            new_h = int(round(w / dst_ratio))
-        else:
-            new_h = h
-            new_w = int(round(h * dst_ratio))
-
-        canvas = Image.new("RGBA", (new_w, new_h), (0, 0, 0, 0))
-        x = (new_w - w) // 2
-        y = (new_h - h) // 2
-        canvas.paste(img, (x, y), img)
-
-        output = BytesIO()
-        canvas.save(output, format=out_format)
-        return output.getvalue(), "image/png"
-
-    async def _pad_images_to_ratio_if_needed(
-        self,
+    @staticmethod
+    def _reference_size(
         images_data: list[tuple[bytes, str]],
-        aspect_ratio: str | None,
-    ) -> list[tuple[bytes, str]]:
-        if not aspect_ratio or not images_data:
-            return images_data
-
-        padded: list[tuple[bytes, str]] = []
-        for img_bytes, _mime in images_data:
-            try:
-                b, m = await asyncio.to_thread(
-                    self._sync_pad_image_to_ratio,
-                    img_bytes,
-                    aspect_ratio,
-                    "PNG",
-                )
-                padded.append((b, m))
-            except Exception:
-                padded.append((img_bytes, _mime))
-
-        return padded
-
-    def _sync_pad_to_square(self, image_data: bytes) -> tuple[bytes, int, int]:
-        """把参考图居中铺到正方形白底上，返回 (png, 原宽, 原高)。"""
-        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
-        w, h = img.size
-        if w < 1 or h < 1:
-            return image_data, w, h
-        if w == h:
-            out = BytesIO()
-            img.save(out, format="PNG")
-            return out.getvalue(), w, h
-
-        side = max(w, h)
-        canvas = Image.new("RGBA", (side, side), (255, 255, 255, 255))
-        canvas.paste(img, ((side - w) // 2, (side - h) // 2), img)
-        out = BytesIO()
-        canvas.save(out, format="PNG")
-        return out.getvalue(), w, h
-
-    def _sync_region_is_blank(
-        self, img: Image.Image, box: tuple[int, int, int, int]
-    ) -> bool:
-        """补边区域是否仍是空白：近白，或被均匀填色（如整片蓝底）。"""
-        x1, y1, x2, y2 = box
-        if x2 <= x1 or y2 <= y1:
-            return True
-        region = img.crop(box).convert("RGB")
-        rw = max(1, region.width // 8)
-        rh = max(1, region.height // 8)
-        region = region.resize((rw, rh), Image.BILINEAR)
-        pixels = list(region.getdata())
-        if not pixels:
-            return True
-        n = len(pixels)
-        mean_r = sum(p[0] for p in pixels) / n
-        mean_g = sum(p[1] for p in pixels) / n
-        mean_b = sum(p[2] for p in pixels) / n
-        std_r = (sum((p[0] - mean_r) ** 2 for p in pixels) / n) ** 0.5
-        std_g = (sum((p[1] - mean_g) ** 2 for p in pixels) / n) ** 0.5
-        std_b = (sum((p[2] - mean_b) ** 2 for p in pixels) / n) ** 0.5
-        if std_r < 15 and std_g < 15 and std_b < 15:
-            return True
-        near_white = sum(
-            1 for r, g, b in pixels if r >= 240 and g >= 240 and b >= 240
-        )
-        return near_white / n >= 0.90
-
-    def _sync_crop_square_to_frame(
-        self, image_data: bytes, orig_w: int, orig_h: int
-    ) -> bytes:
-        """从正方形生成图里裁回参考图比例。补边仍近白或均匀填色时才裁。"""
-        if orig_w < 1 or orig_h < 1:
-            return image_data
-        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
-        w, h = img.size
-        if w < 1 or h < 1:
-            return image_data
-
-        dst_ratio = orig_w / orig_h
-        src_ratio = w / h
-        if abs(src_ratio - dst_ratio) <= 1e-3:
-            out = BytesIO()
-            img.save(out, format="PNG")
-            return out.getvalue()
-
-        if src_ratio > dst_ratio:
-            new_w = max(1, int(round(h * dst_ratio)))
-            x1 = max(0, (w - new_w) // 2)
-            x2 = min(x1 + new_w, w)
-            if not (
-                self._sync_region_is_blank(img, (0, 0, x1, h))
-                and self._sync_region_is_blank(img, (x2, 0, w, h))
-            ):
-                logger.info(
-                    f"补边已有内容，跳过回裁（{w}x{h} → {orig_w}x{orig_h}）"
-                )
-                return image_data
-            img = img.crop((x1, 0, x2, h))
-        else:
-            new_h = max(1, int(round(w / dst_ratio)))
-            y1 = max(0, (h - new_h) // 2)
-            y2 = min(y1 + new_h, h)
-            if not (
-                self._sync_region_is_blank(img, (0, 0, w, y1))
-                and self._sync_region_is_blank(img, (0, y2, w, h))
-            ):
-                logger.info(
-                    f"补边已有内容，跳过回裁（{w}x{h} → {orig_w}x{orig_h}）"
-                )
-                return image_data
-            img = img.crop((0, y1, w, y2))
-
-        out = BytesIO()
-        img.save(out, format="PNG")
-        return out.getvalue()
-
-    async def _pad_images_to_square(
-        self, images_data: list[tuple[bytes, str]]
-    ) -> tuple[list[tuple[bytes, str]], tuple[int, int] | None]:
+    ) -> tuple[int, int] | None:
+        """第一张参考图决定默认画幅，其余图片只作为辅助。"""
         if not images_data:
-            return images_data, None
-        padded: list[tuple[bytes, str]] = []
-        orig_wh: tuple[int, int] | None = None
-        for idx, (img_bytes, _mime) in enumerate(images_data):
-            try:
-                b, ow, oh = await asyncio.to_thread(
-                    self._sync_pad_to_square, img_bytes
-                )
-                padded.append((b, "image/png"))
-                if idx == 0:
-                    orig_wh = (ow, oh)
-            except Exception:
-                padded.append((img_bytes, _mime))
-        return padded, orig_wh
+            return None
+        try:
+            return oriented_size(images_data[0][0])
+        except Exception as exc:
+            logger.warning(f"无法读取第一张参考图尺寸: {exc}")
+            return None
 
-    async def _crop_images_to_frame(
-        self, images: list[bytes], orig_wh: tuple[int, int] | None
-    ) -> list[bytes]:
-        if not images or not orig_wh:
-            return images
-        cropped: list[bytes] = []
-        for b in images:
-            try:
-                nb = await asyncio.to_thread(
-                    self._sync_crop_square_to_frame, b, orig_wh[0], orig_wh[1]
-                )
-                cropped.append(nb)
-            except Exception:
-                cropped.append(b)
-        return cropped
-
-    def _sync_fit_output_to_ratio(
-        self,
-        image_data: bytes,
-        target_ratio: str,
-        mode: str = "crop",
-    ) -> bytes:
-        wh = self._ratio_to_wh(target_ratio)
-        if not wh:
-            return image_data
-
-        rw, rh = wh
-        dst_ratio = rw / rh
-
-        img = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGBA")
-        w, h = img.size
-
-        if w <= 0 or h <= 0:
-            return image_data
-
-        src_ratio = w / h
-        if abs(src_ratio - dst_ratio) < 1e-6:
-            return image_data
-
-        if mode == "crop":
-            if src_ratio > dst_ratio:
-                new_w = int(round(h * dst_ratio))
-                x1 = (w - new_w) // 2
-                img = img.crop((x1, 0, x1 + new_w, h))
-            else:
-                new_h = int(round(w / dst_ratio))
-                y1 = (h - new_h) // 2
-                img = img.crop((0, y1, w, y1 + new_h))
-        else:
-            if src_ratio > dst_ratio:
-                new_w = w
-                new_h = int(round(w / dst_ratio))
-            else:
-                new_h = h
-                new_w = int(round(h * dst_ratio))
-
-            canvas = Image.new("RGBA", (new_w, new_h), (0, 0, 0, 0))
-            x = (new_w - w) // 2
-            y = (new_h - h) // 2
-            canvas.paste(img, (x, y), img)
-            img = canvas
-
-        out = BytesIO()
-        img.save(out, format="PNG")
-        return out.getvalue()
+    def _named_ratio(self, dimensions: tuple[int, int] | None) -> str | None:
+        """仅返回完全匹配的支持比例，不就近吸附。"""
+        if dimensions:
+            width, height = dimensions
+            for name, (rw, rh) in self.RATIO_WH.items():
+                if width * rh == height * rw:
+                    return name
+        return None
 
     async def _post_fix_images_ratio(
         self,
         images: list[bytes],
-        aspect_ratio: str | None,
-        mode: str = "crop",
+        target: tuple[int, int] | None,
+        min_long_edge: int = 0,
     ) -> list[bytes]:
-        if not images or not aspect_ratio:
+        if not images or target is None:
             return images
-
         fixed: list[bytes] = []
-        for b in images:
+        for image_data in images:
             try:
-                nb = await asyncio.to_thread(
-                    self._sync_fit_output_to_ratio,
-                    b,
-                    aspect_ratio,
-                    mode,
+                output = await asyncio.to_thread(
+                    pad_to_ratio, image_data, target, min_long_edge=min_long_edge
                 )
-                fixed.append(nb)
-            except Exception:
-                fixed.append(b)
-
+                if output is not image_data:
+                    logger.info(
+                        f"已保留完整生成内容并补边至 {ratio_label(target)}"
+                    )
+                fixed.append(output)
+            except Exception as exc:
+                # 无法补边时保留完整结果，不隐式改用裁剪或丢掉图片。
+                logger.warning(f"比例适配失败，返回完整生成结果: {exc}")
+                fixed.append(image_data)
         return fixed
 
     def _sync_enforce_resolution(
@@ -1017,28 +818,37 @@ class AIImageGenerator:
         self,
         image_size: str | None,
         aspect_ratio: str | None,
+        provider: ProviderConfig | None = None,
     ) -> int:
         """计算目标分辨率档位的长边像素。
 
-        优先按 gpt-image-2 精确 SIZE_MAPPING 取对应档位+比例的标准长边
+        OpenAI 路由按插件的尺寸预设取对应档位和比例的长边
         （如 4K 1:1=2880、4K 16:9=3840），避免把模型原生 4K 图再放大到
         4096 造成无效插值；表外档位/比例回退到通用档位长边。
         """
         tier = (image_size or "1K").strip().upper()
         ratio = (aspect_ratio or "1:1").strip()
 
+        # Gemini / Vertex 的档位按各自长边处理，不套用 GPT 的像素上限。
+        if provider and provider.api_type in ("gemini", "vertex"):
+            return self.RESOLUTION_LONG_EDGE.get(tier, 1024)
+
         tier_map = self.GPT_IMAGE_SIZES.get(tier)
         if tier_map and ratio in tier_map:
             w, h = (int(x) for x in tier_map[ratio].split("x"))
             return max(w, h)
 
-        return self.RESOLUTION_LONG_EDGE.get(tier, 1024)
+        target = self.RESOLUTION_LONG_EDGE.get(tier, 1024)
+        if provider and supports_custom_image_size(provider.model):
+            return min(target, 3840)
+        return target
 
     async def _enforce_resolution(
         self,
         images: list[bytes],
         image_size: str | None,
         aspect_ratio: str | None = None,
+        provider: ProviderConfig | None = None,
     ) -> list[bytes]:
         """按目标分辨率档位提升生成图片尺寸，保证 1K/2K/4K 生效。
 
@@ -1047,7 +857,7 @@ class AIImageGenerator:
         if not images:
             return images
 
-        target = self._resolution_target_long_edge(image_size, aspect_ratio)
+        target = self._resolution_target_long_edge(image_size, aspect_ratio, provider)
         if not target:
             return images
 
@@ -1158,6 +968,8 @@ class AIImageGenerator:
         if not error:
             return False
         err = str(error)
+        if err in _IMAGE_OPTION_ERRORS.values():
+            return True
         # 内容被拦截时切备用同样会被拦。由统一分类器判定，这样各中转站的
         # 英文拦截文案（如 "filtered out ... Prohibited Use policy"）即使
         # 挂在其他状态码上，也不会切到备用提供商
@@ -1201,8 +1013,9 @@ class AIImageGenerator:
 
         if images_data:
             constraint = (
-                f"参考图的比例为 {aspect_ratio}，输出图片必须保持该比例构图，"
-                f"并填满画面，不要黑边，不要留白。"
+                f"目标输出画幅为 {aspect_ratio}。请保留第一张参考图的完整主体和构图，"
+                "其他参考图只作为辅助；如需适配画幅，请向外扩展背景，"
+                "不要裁掉主体、拉伸内容或将图片强制改成正方形。"
             )
         else:
             constraint = (
@@ -1270,10 +1083,20 @@ class AIImageGenerator:
                 c_data, c_mime = await self._convert_image_format(img_data, mime_type)
                 converted_images.append((c_data, c_mime))
 
-        # 图生图未指定比例：不映射到 9:21 等离散比例。
-        # GPT 按参考图像素传 size；Gemini/Vertex 不传 aspectRatio，避免生成后再裁切。
-        if not aspect_ratio and converted_images:
-            logger.info(f"{prefix}未指定比例，图生图按参考图原始尺寸处理")
+        # 本地目标与 API 可用的画幅分开保存，备用接口也沿用同一个目标。
+        reference_wh = await asyncio.to_thread(self._reference_size, converted_images)
+        target_wh = self._ratio_to_wh(aspect_ratio) or reference_wh
+        native_ratio = aspect_ratio or self._named_ratio(reference_wh)
+        if target_wh:
+            logger.info(
+                f"{prefix}目标比例={ratio_label(target_wh)}，"
+                f"来源={'指令' if aspect_ratio else '第一张参考图'}；比例不符时保留内容并补边"
+            )
+            # 任意原图比例仅通过提示词表达，不强塞到仅支持离散枚举的参数里。
+            if not native_ratio:
+                prompt = self._augment_prompt_for_ratio(
+                    prompt, ratio_label(target_wh), converted_images
+                )
 
         providers: list[ProviderConfig] = [self.main_config]
         if self.backup_config:
@@ -1294,7 +1117,7 @@ class AIImageGenerator:
                         provider,
                         prompt,
                         converted_images,
-                        aspect_ratio,
+                        native_ratio,
                         image_size,
                     )
                 elif provider.api_type == "vertex":
@@ -1302,7 +1125,7 @@ class AIImageGenerator:
                         provider,
                         prompt,
                         converted_images,
-                        aspect_ratio,
+                        native_ratio,
                         image_size,
                     )
                 else:
@@ -1310,25 +1133,27 @@ class AIImageGenerator:
                         provider,
                         prompt,
                         converted_images,
-                        aspect_ratio,
+                        native_ratio,
                         image_size,
                     )
 
                 if images:
-                    # 用户指定了离散比例才强制裁切；未指定则按参考图原比例回裁
-                    if aspect_ratio:
-                        images = await self._post_fix_images_ratio(
-                            images,
-                            aspect_ratio,
-                            mode="crop",
-                        )
-                    # 分辨率落地：模型未按 imageSize 达到目标时，放大到目标长边
-                    images = await self._enforce_resolution(
-                        images,
-                        image_size,
-                        aspect_ratio,
-                    )
                     images = await self._normalize_images_orientation(images)
+                    resolution_ratio = self._named_ratio(target_wh)
+                    if resolution_ratio is None and target_wh:
+                        resolution_ratio = ratio_label(target_wh)
+                    if target_wh:
+                        # 分辨率与补边一次完成，避免放大小画布的比例舍入误差。
+                        images = await self._post_fix_images_ratio(
+                            images, target_wh,
+                            self._resolution_target_long_edge(
+                                image_size, resolution_ratio, provider
+                            ),
+                        )
+                    else:
+                        images = await self._enforce_resolution(
+                            images, image_size, None, provider
+                        )
                     images = await self._ensure_png(images)
                     self.last_used_provider = provider
                     return images, None
@@ -1433,6 +1258,68 @@ class AIImageGenerator:
         except Exception as e:
             return None, str(e)
 
+    def _openai_image_request_size(
+        self,
+        config: ProviderConfig,
+        image_size: str | None,
+        aspect_ratio: str | None,
+        images_data: list[tuple[bytes, str]],
+    ) -> str:
+        target = self._ratio_to_wh(aspect_ratio) or self._reference_size(images_data)
+        if supports_custom_image_size(config.model):
+            named_ratio = self._named_ratio(target)
+            if named_ratio or target is None:
+                return self._build_openai_size(image_size, named_ratio)
+            tier = (image_size or "1K").strip().upper()
+            return gpt_image_2_size(target, self.RESOLUTION_LONG_EDGE.get(tier, 1024))
+        model = config.model.strip().lower().rsplit("/", 1)[-1]
+        if model.startswith("gpt-image-1"):
+            return legacy_gpt_image_size(target)
+        # 自定义模型别名能力未知时使用 auto，本地目标画幅仍保持不变。
+        return "auto"
+
+    def _gpt_image_25_options(self, config: ProviderConfig) -> dict[str, str]:
+        """2.5 专属可选参数；auto 使用上游默认值，不改变其他模型的请求。"""
+        if not is_gpt_image_2_5(config.model):
+            return {}
+        options = {"output_format": "png"}
+        if self.gpt_image_quality != "auto":
+            options["quality"] = self.gpt_image_quality
+        if self.gpt_image_background != "auto":
+            options["background"] = self.gpt_image_background
+        return options
+
+    @staticmethod
+    def _rejected_image_parameter(body: str) -> str | None:
+        """读取结构化参数错误；未知错误或内容审核错误不会被当作参数错误。"""
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            return None
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return None
+        code = str(error.get("code") or "").lower()
+        if code not in {
+            "unsupported_parameter", "unknown_parameter", "invalid_parameter",
+            "invalid_value", "unsupported_value", "invalid_size",
+        }:
+            return None
+        param = error.get("param")
+        return param if isinstance(param, str) else None
+
+    @classmethod
+    def _unsupported_image_parameters(cls, body: str) -> set[str]:
+        """仅尺寸和旧模型的保真参数允许兼容降级一次。"""
+        param = cls._rejected_image_parameter(body)
+        return {param} if param in {"size", "input_fidelity"} else set()
+
+    @classmethod
+    def _image_option_error(cls, status: int, body: str) -> str | None:
+        if status not in (400, 422):
+            return None
+        return _IMAGE_OPTION_ERRORS.get(cls._rejected_image_parameter(body))
+
     async def _generate_openai_image_api(
         self,
         config: ProviderConfig,
@@ -1445,28 +1332,17 @@ class AIImageGenerator:
             session = self._get_session(config.proxy)
             headers_auth = {"Authorization": f"Bearer {config.api_key}"}
 
-            size = None
-            if aspect_ratio:
-                size = self._build_openai_size(image_size, aspect_ratio)
-                prompt = self._augment_prompt_for_ratio(
-                    prompt, aspect_ratio, images_data
-                )
-            elif images_data:
-                # 中转站常把 size 锁成 1:1。先把参考图补成正方形再生成，
-                # 生成后再裁回原图比例，避免内容被切掉。
-                size = self._build_openai_size(image_size, "1:1")
-                prompt = (
-                    "The input is a screenshot centered on a white square canvas. "
-                    "Keep the screenshot unchanged except for the requested edit. "
-                    "Do not crop, reframe, or fill the white padding with new content.\n"
-                    f"{prompt}"
-                )
-            else:
-                size = self._build_openai_size(image_size, None)
+            size = self._openai_image_request_size(
+                config, image_size, aspect_ratio, images_data
+            )
+            image_options = self._gpt_image_25_options(config)
+            prompt = self._augment_prompt_for_ratio(prompt, aspect_ratio, images_data)
 
             logger.info(
                 f"OpenAI images route: aspect_ratio={aspect_ratio}, "
-                f"size={size}, refs={len(images_data)}"
+                f"size={size}, refs={len(images_data)}, "
+                f"quality={image_options.get('quality', 'auto')}, "
+                f"background={image_options.get('background', 'auto')}"
             )
 
             if not images_data:
@@ -1474,8 +1350,11 @@ class AIImageGenerator:
                 payload = {
                     "model": config.model,
                     "prompt": prompt,
-                    "response_format": "b64_json",
+                    **image_options,
                 }
+                # 2.5 原生接口返回 base64，图片编码由 output_format 指定。
+                if not is_gpt_image_2_5(config.model):
+                    payload["response_format"] = "b64_json"
 
                 if size:
                     payload["size"] = size
@@ -1490,22 +1369,21 @@ class AIImageGenerator:
 
                 response = await _post_generations(payload)
                 if response.status == 400 and size:
-                    # size 不被当前端点支持（严格 OpenAI 枚举值）时去掉重试，
-                    # 由生成后长边放大兜底保证 2K/4K 输出
                     body = await response.text()
                     response.close()
-
-                    # 内容审核类 400 与 size 无关，去掉也会被拒，直接返回
+                    option_error = self._image_option_error(response.status, body)
+                    if option_error:
+                        return None, option_error
                     err = f"API {response.status}: {body[:300]}"
-                    if self._is_content_block(err):
+                    if "size" not in self._unsupported_image_parameters(body):
                         return None, err
-
+                    # 只有明确拒绝 size 时才降级一次；本地目标比例不会被清除。
                     payload.pop("size", None)
                     response = await _post_generations(payload)
                 async with response:
                     if response.status != 200:
                         body = await response.text()
-                        return None, f"API {response.status}: {body[:300]}"
+                        return None, self._image_option_error(response.status, body) or f"API {response.status}: {body[:300]}"
 
                     images, data, parse_error = await self._extract_images_from_response(response)
                     if images:
@@ -1516,25 +1394,15 @@ class AIImageGenerator:
 
                     return self._no_image_error(data)
 
-            orig_wh: tuple[int, int] | None = None
-            if aspect_ratio:
-                images_data = await self._pad_images_to_ratio_if_needed(
-                    images_data,
-                    aspect_ratio,
-                )
-            else:
-                images_data, orig_wh = await self._pad_images_to_square(images_data)
-                logger.info(
-                    f"OpenAI images edits 未指定比例，参考图已补成 1:1 再生成"
-                    + (f"（原图 {orig_wh[0]}x{orig_wh[1]}）" if orig_wh else "")
-                )
-
+            # 参考图保持各自原有画幅；补边仅作用于模型返回的结果。
             url = f"{config.base_url}/images/edits"
 
             async def _post_edits(size_value: str | None, fidelity: bool):
                 form = aiohttp.FormData()
                 form.add_field("model", config.model)
                 form.add_field("prompt", prompt)
+                for name, value in image_options.items():
+                    form.add_field(name, value)
 
                 if size_value:
                     form.add_field("size", size_value)
@@ -1542,7 +1410,10 @@ class AIImageGenerator:
                     form.add_field("input_fidelity", "high")
 
                 for idx, (img_bytes, mime) in enumerate(images_data):
-                    ext = "png" if "png" in mime else "jpg"
+                    ext = {
+                        "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+                        "image/heic": "heic", "image/heif": "heif",
+                    }.get(mime, "bin")
                     form.add_field(
                         "image",
                         img_bytes,
@@ -1557,26 +1428,34 @@ class AIImageGenerator:
                     timeout=aiohttp.ClientTimeout(total=self.timeout),
                 )
 
-            response = await _post_edits(size, True)
+            model = config.model.strip().lower().rsplit("/", 1)[-1]
+            # GPT Image 2 自动使用高保真输入，官方接口不接受 input_fidelity。
+            fidelity = model.startswith("gpt-image-1")
+            response = await _post_edits(size, fidelity)
             if response.status == 400:
                 body = await response.text()
                 response.close()
+                option_error = self._image_option_error(response.status, body)
+                if option_error:
+                    return None, option_error
                 err = f"API {response.status}: {body[:300]}"
-                if self._is_content_block(err):
+                unsupported = self._unsupported_image_parameters(body)
+                if not unsupported:
                     return None, err
                 logger.info(
-                    f"OpenAI images edits 400，去掉 size/fidelity 重试: {body[:200]}"
+                    f"OpenAI images edits 参数降级一次: {', '.join(sorted(unsupported))}"
                 )
-                response = await _post_edits(None, False)
+                response = await _post_edits(
+                    None if "size" in unsupported else size,
+                    False if "input_fidelity" in unsupported else fidelity,
+                )
             async with response:
                 if response.status != 200:
                     body = await response.text()
-                    return None, f"API {response.status}: {body[:300]}"
+                    return None, self._image_option_error(response.status, body) or f"API {response.status}: {body[:300]}"
 
                 images, data, parse_error = await self._extract_images_from_response(response)
                 if images:
-                    if orig_wh:
-                        images = await self._crop_images_to_frame(images, orig_wh)
                     return images, None
 
                 if parse_error:
@@ -1745,7 +1624,7 @@ class AIImageGenerator:
             if response.status == 400 and "generationConfig" in payload:
                 # generationConfig 为可选字段，部分中转站不识别
                 # imageConfig/responseModalities 等会返回 400，去掉重试一次，
-                # 比例/分辨率由本地后处理（裁剪/长边放大）兜底保证生效
+                # 比例/分辨率由本地后处理（补边/等比放大）兜底
                 body = await response.text()
                 response.close()
 

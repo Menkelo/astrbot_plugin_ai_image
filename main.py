@@ -267,6 +267,8 @@ class Gemini_Images(Star):
 
         self.timeout = int(gen_config.get("timeout", 180))
         self.max_image_size_mb = int(gen_config.get("max_image_size_mb", 10))
+        self.gpt_image_quality = gen_config.get("gpt_image_quality", "auto")
+        self.gpt_image_background = gen_config.get("gpt_image_background", "auto")
 
         self.perm_mode = perm_conf.get("mode", "disable")
         self.perm_users = set(perm_conf.get("users", []))
@@ -1729,6 +1731,8 @@ class Gemini_Images(Star):
             vertex_start_idx=vertex_start,
             gemini_start_idx=gemini_start,
             backup_config=backup_provider,
+            gpt_image_quality=self.gpt_image_quality,
+            gpt_image_background=self.gpt_image_background,
         )
 
         success = False

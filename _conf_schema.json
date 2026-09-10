@@ -211,6 +211,20 @@
         "hint": "用户上传的参考图片最大允许大小",
         "type": "int",
         "default": 10
+      },
+      "gpt_image_quality": {
+        "description": "GPT Image 2.5 质量",
+        "hint": "用于 Sunburst / Flare 的原生图像接口。auto 由模型选择；xhigh、max 通常需要更多生成时间和费用。其他模型使用原有参数。",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "low", "medium", "high", "xhigh", "max"]
+      },
+      "gpt_image_background": {
+        "description": "GPT Image 2.5 背景",
+        "hint": "auto 自动选择，opaque 不透明，transparent 透明。2.5 使用 PNG 输出；透明图的补边也保留透明度。其他模型使用原有参数。",
+        "type": "string",
+        "default": "auto",
+        "options": ["auto", "opaque", "transparent"]
       }
     }
   },

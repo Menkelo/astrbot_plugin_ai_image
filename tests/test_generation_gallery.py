@@ -72,6 +72,8 @@ class GenerationGalleryTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.plugin = MAIN.Gemini_Images.__new__(MAIN.Gemini_Images)
         self.plugin.timeout = 30
+        self.plugin.gpt_image_quality = "auto"
+        self.plugin.gpt_image_background = "auto"
         self.plugin._vertex_key_cursor = 0
         self.plugin._gemini_key_cursor = 0
         self.plugin._get_http_session = Mock(return_value=object())
@@ -112,7 +114,9 @@ class GenerationGalleryTests(unittest.IsolatedAsyncioTestCase):
 
     async def generate(self):
         with (
-            patch.object(MAIN, "AIImageGenerator", return_value=self.fake_generator),
+            patch.object(
+                MAIN, "AIImageGenerator", return_value=self.fake_generator
+            ) as factory,
             patch.object(MAIN, "save_temp_img", side_effect=self.save_temp),
         ):
             await self.plugin._generate_and_send_image_async(
@@ -129,6 +133,14 @@ class GenerationGalleryTests(unittest.IsolatedAsyncioTestCase):
                 command="生图",
                 backup_provider=self.backup_provider,
             )
+        return factory.call_args.kwargs
+
+    async def test_gpt_image_options_are_forwarded_to_the_generator(self):
+        self.plugin.gpt_image_quality = "xhigh"
+        self.plugin.gpt_image_background = "transparent"
+        options = await self.generate()
+        self.assertEqual(options["gpt_image_quality"], "xhigh")
+        self.assertEqual(options["gpt_image_background"], "transparent")
 
     async def test_generated_images_archive_actual_fallback_and_keep_delivery(self):
         await self.generate()
