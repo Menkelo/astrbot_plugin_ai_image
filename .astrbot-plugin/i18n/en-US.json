@@ -1,0 +1,8 @@
+{
+  "pages": {
+    "gallery": {
+      "title": "Image library",
+      "description": "Browse generated images, organize albums and tags, search prompts, and download or restore images."
+    }
+  }
+}

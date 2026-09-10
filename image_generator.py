@@ -210,6 +210,7 @@ class AIImageGenerator:
     ):
         self.main_config = main_config
         self.backup_config = backup_config
+        self.last_used_provider: ProviderConfig | None = None
         self.timeout = timeout
         self._session = session
         # 仅当会话由本实例创建时才负责关闭；注入的共享会话不在此关闭
@@ -1258,6 +1259,7 @@ class AIImageGenerator:
         task_id: str | None = None,
     ) -> tuple[list[bytes] | None, str | None]:
         prefix = f"[{task_id}] " if task_id else ""
+        self.last_used_provider = None
 
         if not self.main_config:
             return None, "未配置提供商"
@@ -1328,6 +1330,7 @@ class AIImageGenerator:
                     )
                     images = await self._normalize_images_orientation(images)
                     images = await self._ensure_png(images)
+                    self.last_used_provider = provider
                     return images, None
 
                 last_error = self._format_user_error(error)

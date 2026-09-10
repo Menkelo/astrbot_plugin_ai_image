@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>图片管理 · 映像</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="图库导航">
+      <a class="brand" href="#" id="brand-home" aria-label="映像，返回全部图片">
+        <span class="brand-mark" data-icon="aperture"></span>
+        <span><strong>映像<span class="brand-dot">.</span></strong><small>YOUR CREATIVE LIBRARY</small></span>
+      </a>
+      <div class="sidebar-scroll">
+        <p class="section-label">我的空间</p>
+        <nav id="library-nav" class="nav-list">
+          <button class="nav-item active" data-view="all" aria-current="page"><span data-icon="grid"></span><span>全部图片</span><span class="nav-count" id="count-all">—</span></button>
+          <button class="nav-item" data-view="favorites"><span data-icon="heart"></span><span>我的收藏</span><span class="nav-count" id="count-favorites">—</span></button>
+          <button class="nav-item" data-view="unfiled"><span data-icon="inbox"></span><span>未分组</span><span class="nav-count" id="count-unfiled">—</span></button>
+        </nav>
+        <div class="section-heading"><p class="section-label">相册</p><button id="create-album" class="icon-button" title="新建相册" aria-label="新建相册" data-icon="plus"></button></div>
+        <nav id="album-nav" class="nav-list" aria-label="相册"></nav>
+        <p id="album-empty" class="sidebar-hint">把同一个灵感，放进同一个相册。</p>
+        <div class="section-heading tags-heading"><p class="section-label">常用标签</p></div>
+        <div id="sidebar-tags" class="sidebar-tags"></div>
+        <p id="tags-empty" class="sidebar-hint">给图片添加标签，下次更好找。</p>
+      </div>
+      <div class="sidebar-bottom">
+        <button class="nav-item" id="trash-nav" data-view="trash"><span data-icon="trash"></span><span>回收站</span><span class="nav-count" id="count-trash">—</span></button>
+        <div class="storage-info"><div><span data-icon="drive"></span><span>图库空间</span><strong id="storage-used">—</strong></div><progress id="storage-meter" max="100" value="0" hidden></progress><p id="storage-caption">原图与创作记录，安心留存。</p></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="main-content">
+      <header class="page-header">
+        <div class="heading-group"><p class="eyebrow">A LITTLE SPACE FOR BIG IDEAS</p><div class="title-row"><h1 id="page-title">全部图片</h1><div id="album-actions" hidden><button id="rename-album" class="icon-button" aria-label="重命名相册" title="重命名相册" data-icon="edit"></button><button id="delete-album" class="icon-button" aria-label="删除相册" title="删除相册" data-icon="trash"></button></div></div><p id="page-description">让每一次灵感，都有迹可循。</p></div>
+        <div class="header-actions"><button id="refresh" class="button secondary" title="刷新图库"><span data-icon="refresh"></span><span>刷新</span></button><button id="import-button" class="button primary"><span data-icon="upload"></span><span>导入图片</span></button><input id="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif" multiple hidden></div>
+      </header>
+
+      <div id="upload-status" class="upload-status" role="status" hidden><div><span data-icon="upload"></span><span id="upload-label"></span></div><progress id="upload-progress" max="100" value="0"></progress></div>
+
+      <section class="tools" aria-label="图片搜索与筛选">
+        <div class="search-row">
+          <div class="search-box"><span data-icon="search"></span><input id="search" type="search" autocomplete="off" maxlength="300" placeholder="搜索提示词、名称、标签或创作者…" aria-label="搜索图片"><kbd>/</kbd></div>
+          <button id="filter-toggle" class="button secondary" aria-expanded="false" aria-controls="filter-panel"><span data-icon="sliders"></span><span>筛选</span><span class="filter-count" id="filter-count" hidden>0</span></button>
+        </div>
+        <div id="filter-panel" class="filter-panel" hidden>
+          <label>模型<select id="model-filter"><option value="">全部模型</option></select></label>
+          <label>标签<select id="tag-filter"><option value="">全部标签</option></select></label>
+          <label>画面方向<select id="orientation-filter"><option value="">全部方向</option><option value="landscape">横向</option><option value="portrait">纵向</option><option value="square">正方形</option></select></label>
+          <label>开始日期<input id="date-from" type="date"></label>
+          <label>结束日期<input id="date-to" type="date"></label>
+          <button id="reset-filters" class="text-button">重置筛选</button>
+        </div>
+        <div class="browse-toolbar">
+          <div class="source-tabs" id="source-tabs" aria-label="图片来源"><button class="source-tab active" data-source="" aria-pressed="true">全部<span id="source-total"></span></button><button class="source-tab" data-source="generated" aria-pressed="false"><span data-icon="sparkles"></span>AI 生成</button><button class="source-tab" data-source="imported" aria-pressed="false">本地导入</button></div>
+          <div class="view-tools"><select id="sort" aria-label="排序方式"><option value="newest">最新优先</option><option value="oldest">最早优先</option><option value="largest">文件大小</option><option value="name">名称排序</option></select><span class="tool-divider"></span><button id="density" class="icon-button" title="切换紧凑布局" aria-label="切换紧凑布局" aria-pressed="false" data-icon="layout"></button><button id="selection-mode" class="icon-button" title="批量选择" aria-label="批量选择" aria-pressed="false" data-icon="check-square"></button></div>
+        </div>
+      </section>
+
+      <div class="results-line"><div><label id="select-page-label" class="select-page" hidden><input id="select-page" type="checkbox">全选本页</label><span id="result-count" role="status">正在连接图库…</span><button id="clear-search" class="text-button" hidden>清除筛选</button></div><span id="archive-status" class="archive-status"><span class="status-dot"></span><span>创作，收集，再发现</span></span></div>
+      <div id="trash-notice" class="info-banner" hidden><span data-icon="info"></span><p>这里的图片可以随时恢复。只有永久删除后，才会释放占用的空间。</p></div>
+      <div id="gallery-grid" class="gallery-grid" aria-label="图片列表" aria-busy="true"></div>
+      <div id="empty-state" class="empty-state" hidden><div class="empty-art"><span data-icon="image"></span><span class="empty-spark" data-icon="sparkles"></span></div><p class="eyebrow">MAKE ROOM FOR INSPIRATION</p><h2 id="empty-title">你的灵感，即将入藏</h2><p id="empty-description">生成一张图片，或把喜欢的作品拖到这里。</p><button id="empty-action" class="button primary"><span data-icon="upload"></span><span>导入第一张图片</span></button></div>
+      <footer class="gallery-footer"><span id="footer-note">属于你的每一帧灵感。</span><nav class="pagination" aria-label="分页"><button id="previous-page" class="icon-button" aria-label="上一页" data-icon="chevron-left" disabled></button><span id="page-number">1 / 1</span><button id="next-page" class="icon-button" aria-label="下一页" data-icon="chevron-right" disabled></button></nav></footer>
+    </main>
+  </div>
+
+  <div id="batch-bar" class="batch-bar" aria-label="批量操作" hidden><div class="batch-summary"><span class="selected-badge" id="selected-count">0</span><span>张已选</span></div><div class="batch-actions"><button class="batch-button" data-batch="download"><span data-icon="download"></span><span>下载</span></button><button class="batch-button active-only" data-batch="favorite"><span data-icon="heart"></span><span>收藏</span></button><button class="batch-button active-only" data-batch="album"><span data-icon="folder-plus"></span><span>加入相册</span></button><button class="batch-button active-only" data-batch="tags"><span data-icon="tag"></span><span>标签</span></button><button class="batch-button active-only" data-batch="trash"><span data-icon="trash"></span><span>移入回收站</span></button><button class="batch-button trash-only" data-batch="restore"><span data-icon="restore"></span><span>恢复</span></button><button class="batch-button danger-text trash-only" data-batch="purge"><span data-icon="trash"></span><span>永久删除</span></button><button id="remove-from-album" class="batch-button" data-batch="remove-album" hidden><span data-icon="folder-minus"></span><span>移出相册</span></button></div><button id="clear-selection" class="icon-button" aria-label="取消选择" title="取消选择" data-icon="x"></button></div>
+
+  <dialog id="viewer" class="viewer-dialog" aria-labelledby="detail-title">
+    <div class="viewer-shell">
+      <div class="preview-column"><div class="preview-toolbar"><span class="preview-label"><span data-icon="image"></span>作品预览</span><div><button id="viewer-previous" class="icon-button" aria-label="上一张图片" title="上一张（←）" data-icon="chevron-left"></button><span id="viewer-position"></span><button id="viewer-next" class="icon-button" aria-label="下一张图片" title="下一张（→）" data-icon="chevron-right"></button><span class="tool-divider"></span><button id="preview-zoom" class="icon-button" aria-label="放大预览" title="放大预览" aria-pressed="false" data-icon="expand"></button><button id="close-viewer-mobile" class="icon-button mobile-close" aria-label="关闭预览" data-icon="x"></button></div></div><div id="preview-stage" class="preview-stage"><img id="preview-image" alt="" hidden><span id="preview-loading" class="preview-loading">正在载入预览…</span></div><div class="preview-footer"><span id="preview-format"></span><span>← → 切换 · Esc 关闭</span></div></div>
+      <aside class="detail-column"><header class="detail-header"><span>图片详情</span><button id="close-viewer" class="icon-button" aria-label="关闭图片详情" data-icon="x"></button></header><div id="detail-content" class="detail-content"><h2 id="detail-title">正在读取…</h2><p id="detail-date" class="muted"></p><div id="detail-badges" class="detail-badges"></div><dl id="detail-metadata" class="metadata-grid"></dl><div class="prompt-heading"><h3>创作提示词</h3><button id="copy-prompt" class="text-button"><span data-icon="copy"></span>复制</button></div><p id="detail-prompt" class="prompt-content"></p><button id="copy-command" class="button secondary wide"><span data-icon="terminal"></span><span>复制生成命令</span></button><p id="reference-hint" class="field-hint" hidden>这张图使用了参考图片，再次生成时请一并附上参考图。</p><form id="detail-form"><label>作品名称<input id="edit-title" maxlength="200" required></label><label>标签<span class="field-hint">用逗号分隔，最多 20 个</span><input id="edit-tags" placeholder="风景, 灵感, 壁纸" maxlength="820"></label><label>备注<textarea id="edit-notes" rows="3" maxlength="4000" placeholder="记下这张图的小故事…"></textarea></label><details class="album-picker"><summary>所属相册<span id="detail-album-count"></span></summary><div id="detail-albums"></div></details><button type="submit" class="button secondary wide" id="save-detail"><span data-icon="check"></span><span>保存修改</span></button></form></div><footer class="detail-actions"><button id="detail-download" class="button primary"><span data-icon="download"></span><span>下载原图</span></button><button id="detail-favorite" class="icon-button" aria-label="收藏图片" title="收藏（F）" aria-pressed="false" data-icon="heart"></button><button id="detail-trash" class="icon-button" aria-label="移入回收站" title="移入回收站" data-icon="trash"></button><button id="detail-restore" class="button secondary" hidden><span data-icon="restore"></span><span>恢复</span></button></footer></aside>
+    </div>
+  </dialog>
+
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="action-title"><form id="action-form"><div class="action-heading"><span id="action-icon" class="action-icon" data-icon="folder-plus"></span><button type="button" id="action-close" class="icon-button" aria-label="关闭对话框" data-icon="x"></button></div><h2 id="action-title"></h2><p id="action-description"></p><div id="action-fields"></div><footer><button type="button" id="action-cancel" class="button secondary">取消</button><button type="submit" id="action-submit" class="button primary">确定</button></footer></form></dialog>
+  <div id="drop-overlay" class="drop-overlay" hidden><div><span data-icon="upload"></span><h2>把灵感放进来</h2><p>松开鼠标，导入到你的图库</p><small>PNG · JPEG · WebP · GIF</small></div></div>
+  <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -21,6 +21,7 @@ from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.utils.io import download_image_by_url, save_temp_img
 
 from .image_generator import AIImageGenerator, ProviderConfig, fetch_gemini_models
+from .gallery_store import GalleryStore
 
 
 @dataclass
@@ -90,6 +91,9 @@ class Gemini_Images(Star):
         self._quota_file = self._resolve_quota_file()
         self._quota_data = self._load_quota_data()
 
+        self.gallery_store: GalleryStore | None = None
+        self._gallery_api = None
+
         for s in self.slots:
             if s.provider:
                 logger.info(
@@ -102,13 +106,43 @@ class Gemini_Images(Star):
                 )
 
     async def initialize(self):
-        """插件加载后从 Gemini 接口拉取生图模型列表，注入配置页下拉选项。
+        """初始化持久图库，并刷新 Gemini 生图模型的配置页下拉选项。
 
         AstrBot 配置页读取的是插件 AstrBotConfig 实例上的 schema 对象
         （新旧版本行为一致），运行时写入 options 即可让配置页变为下拉列表；
         拉取失败则保持手填输入框，不影响使用（生图时 auto 仍会自动获取）。
         """
+        await self._initialize_gallery()
         await self._refresh_gemini_model_options()
+
+    async def _initialize_gallery(self) -> None:
+        if not self.gallery_enabled:
+            return
+        try:
+            data_dir = Path(StarTools.get_data_dir("astrbot_plugin_ai_image"))
+            self.gallery_store = await asyncio.to_thread(
+                GalleryStore, data_dir / "gallery",
+                max_storage_mb=self.gallery_max_storage_mb,
+                max_upload_mb=self.gallery_max_upload_mb,
+            )
+        except Exception:
+            logger.exception("图库初始化失败，图片生成仍然可用")
+            return
+        try:
+            from .gallery_api import GalleryAPI
+        except ImportError:
+            logger.warning(
+                "当前 AstrBot 不支持插件 Pages Web API，已启用图片归档；"
+                "请升级至支持 astrbot.api.web 的版本后使用图片管理页面"
+            )
+            return
+        try:
+            self._gallery_api = GalleryAPI(
+                self.context, self.gallery_store, auto_archive=self.gallery_auto_archive
+            )
+            logger.info("图片管理 Page 已就绪，可从插件详情页打开「图片管理」")
+        except Exception:
+            logger.exception("图片管理 API 注册失败，图片生成和归档仍然可用")
 
     async def _refresh_gemini_model_options(self) -> None:
         """拉取 Gemini 生图模型并写入配置页两个槽位的模型下拉选项。"""
@@ -147,9 +181,13 @@ class Gemini_Images(Star):
 
     async def terminate(self):
         try:
+            if self._gallery_api:
+                self._gallery_api.close()
             for task in list(self.background_tasks):
                 if not task.done():
                     task.cancel()
+            if self.background_tasks:
+                await asyncio.gather(*list(self.background_tasks), return_exceptions=True)
             if self._http_session and not self._http_session.closed:
                 await self._http_session.close()
             logger.info("插件已卸载")
@@ -220,6 +258,12 @@ class Gemini_Images(Star):
         quota_conf = self.config.get("quota_config", {}) or {}
         vertex_conf = self.config.get("vertex_manual_config", {}) or {}
         gemini_conf = self.config.get("gemini_manual_config", {}) or {}
+        gallery_conf = self.config.get("gallery_config", {}) or {}
+
+        self.gallery_enabled = bool(gallery_conf.get("enabled", True))
+        self.gallery_auto_archive = bool(gallery_conf.get("auto_archive", True))
+        self.gallery_max_storage_mb = max(0, int(gallery_conf.get("max_storage_mb", 0)))
+        self.gallery_max_upload_mb = max(1, min(100, int(gallery_conf.get("max_upload_mb", 25))))
 
         self.timeout = int(gen_config.get("timeout", 180))
         self.max_image_size_mb = int(gen_config.get("max_image_size_mb", 10))
@@ -1286,6 +1330,7 @@ class Gemini_Images(Star):
                 user_id=user_id,
                 quota_consumed=quota_consumed,
                 backup_provider=backup_provider,
+                command=slot.command,
             )
         )
 
@@ -1657,6 +1702,7 @@ class Gemini_Images(Star):
         user_id: str = "",
         quota_consumed: bool = False,
         backup_provider: ProviderConfig | None = None,
+        command: str = "",
     ):
         if not task_id:
             task_id = hashlib.md5(f"{time.time()}".encode()).hexdigest()[:8]
@@ -1686,6 +1732,7 @@ class Gemini_Images(Star):
         )
 
         success = False
+        started_at = time.monotonic()
 
         try:
             results, error = await generator.generate_image(
@@ -1707,12 +1754,39 @@ class Gemini_Images(Star):
             success = True
             logger.info(f"任务完成 [{task_id}] - 生成了 {len(results)} 张图片")
 
+            archive_metadata = None
+            if self.gallery_store is not None and self.gallery_auto_archive:
+                try:
+                    # Record the provider that actually succeeded, including fallback.
+                    actual_provider = generator.last_used_provider or provider
+                    archive_metadata = {
+                        "prompt": prompt,
+                        "model": actual_provider.model,
+                        "provider": actual_provider.name,
+                        "command": command,
+                        "resolution": resolution,
+                        "aspect_ratio": final_ar or "",
+                        "user_id": user_id,
+                        "user_name": str(event.get_sender_name() or ""),
+                        "group_id": str(event.message_obj.group_id or ""),
+                        "reference_count": len(images_data or []),
+                        "duration_ms": int((time.monotonic() - started_at) * 1000),
+                    }
+                except Exception as e:
+                    logger.warning(f"无法读取图片归档信息 [{task_id}]，继续发送生成结果: {e}")
+
             components = []
 
             if reply_id:
                 components.append(Comp.Reply(id=reply_id))
 
             for img_bytes in results:
+                if self.gallery_store is not None and archive_metadata is not None:
+                    try:
+                        await asyncio.to_thread(self.gallery_store.add_image, img_bytes, archive_metadata)
+                    except Exception as e:
+                        # Library capacity or disk errors must not prevent delivery of a result.
+                        logger.warning(f"图片归档失败 [{task_id}]，继续发送生成结果: {e}")
                 try:
                     file_path = await asyncio.to_thread(save_temp_img, img_bytes)
                     components.append(Comp.Image.fromFileSystem(file_path))

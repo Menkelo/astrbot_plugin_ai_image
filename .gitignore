@@ -44,10 +44,11 @@ desktop.ini
 daily_quota_usage.json
 *.log
 
-# Test
-test/
-tests/
-*.test.py
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+artifacts/
 
 # Temporary files
 *.tmp

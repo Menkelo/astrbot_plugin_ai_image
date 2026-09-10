@@ -214,6 +214,36 @@
       }
     }
   },
+  "gallery_config": {
+    "description": "图片管理（Canvas Page）",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用图片管理",
+        "hint": "在插件详情页打开「图片管理」。页面需要支持插件 Pages 与 astrbot.api.web 的 AstrBot 版本。",
+        "type": "bool",
+        "default": true
+      },
+      "auto_archive": {
+        "description": "自动保存生成结果",
+        "hint": "保存原图、提示词及实际出图模型。原图独立存放在插件数据目录，更新插件不会清除。",
+        "type": "bool",
+        "default": true
+      },
+      "max_storage_mb": {
+        "description": "图库容量上限（MB）",
+        "hint": "0 表示不限。包括原图、预览和回收站；达到上限后暂停新增归档，仍正常发送生成结果。不会自动删除旧图。",
+        "type": "int",
+        "default": 0
+      },
+      "max_upload_mb": {
+        "description": "单张导入图片上限（MB）",
+        "hint": "1–100 MB，支持 PNG/JPEG/WebP/GIF。",
+        "type": "int",
+        "default": 25
+      }
+    }
+  },
   "permission_config": {
     "description": "权限配置",
     "type": "object",
