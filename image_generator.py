@@ -1083,14 +1083,14 @@ class AIImageGenerator:
                 c_data, c_mime = await self._convert_image_format(img_data, mime_type)
                 converted_images.append((c_data, c_mime))
 
-        # 本地目标与 API 可用的画幅分开保存，备用接口也沿用同一个目标。
+        # 目标与 API 可用的画幅分开保存；是否补边由实际成功的提供商决定。
         reference_wh = await asyncio.to_thread(self._reference_size, converted_images)
         target_wh = self._ratio_to_wh(aspect_ratio) or reference_wh
         native_ratio = aspect_ratio or self._named_ratio(reference_wh)
         if target_wh:
             logger.info(
                 f"{prefix}目标比例={ratio_label(target_wh)}，"
-                f"来源={'指令' if aspect_ratio else '第一张参考图'}；比例不符时保留内容并补边"
+                f"来源={'指令' if aspect_ratio else '第一张参考图'}"
             )
             # 任意原图比例仅通过提示词表达，不强塞到仅支持离散枚举的参数里。
             if not native_ratio:
@@ -1142,7 +1142,7 @@ class AIImageGenerator:
                     resolution_ratio = self._named_ratio(target_wh)
                     if resolution_ratio is None and target_wh:
                         resolution_ratio = ratio_label(target_wh)
-                    if target_wh:
+                    if target_wh and provider.api_type not in ("gemini", "vertex"):
                         # 分辨率与补边一次完成，避免放大小画布的比例舍入误差。
                         images = await self._post_fix_images_ratio(
                             images, target_wh,
@@ -1151,6 +1151,13 @@ class AIImageGenerator:
                             ),
                         )
                     else:
+                        # Gemini/Vertex 原生尺寸可能只是近似所请求的比例。
+                        # 保留返回画幅，避免把正常输出补出上下或左右白边。
+                        if target_wh:
+                            logger.info(
+                                f"{prefix}{provider.api_type} 保留接口返回画幅，"
+                                "仅按分辨率档位等比放大"
+                            )
                         images = await self._enforce_resolution(
                             images, image_size, None, provider
                         )
@@ -1624,7 +1631,7 @@ class AIImageGenerator:
             if response.status == 400 and "generationConfig" in payload:
                 # generationConfig 为可选字段，部分中转站不识别
                 # imageConfig/responseModalities 等会返回 400，去掉重试一次，
-                # 比例/分辨率由本地后处理（补边/等比放大）兜底
+                # 保留接口返回画幅，分辨率由本地等比放大兜底
                 body = await response.text()
                 response.close()
 

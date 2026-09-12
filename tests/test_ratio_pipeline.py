@@ -8,7 +8,7 @@ from email.parser import BytesParser
 from io import BytesIO
 from unittest.mock import AsyncMock
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from tests.test_generation_gallery import GENERATOR
 from tests.test_image_geometry import encode, subject_picture
@@ -171,9 +171,9 @@ class RatioPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.requests[0]["fields"]["size"], "1280x720")
         self.assert_ratio(images[0], (16, 9))
 
-    async def test_all_provider_routes_share_the_same_content_preserving_fallback(self):
+    async def test_provider_routes_keep_content_with_their_own_ratio_policy(self):
         reference = encode(Image.new("RGB", (200, 400), "green"))
-        returned = encode(subject_picture())
+        returned = encode(subject_picture((1024, 1024)))
         for api_type, method in [
             ("gemini", "_generate_gemini"),
             ("vertex", "_generate_vertex"),
@@ -193,7 +193,118 @@ class RatioPipelineTests(unittest.IsolatedAsyncioTestCase):
                     handler.await_args.args[3]
                 )  # 1:2 is not a native discrete ratio.
                 self.assertIn("1:2", handler.await_args.args[1])
-                self.assert_ratio(images[0], (1, 2))
+                if api_type == "openai":
+                    self.assert_ratio(images[0], (1, 2))
+                else:
+                    self.assertEqual(images[0], returned)
+
+    async def test_gemini_explicit_ratios_keep_native_pixels_without_borders(self):
+        reference = encode(Image.new("RGB", (200, 400), "green"))
+        for ratio, size in [
+            ("16:9", (1344, 768)),
+            ("16:9", (1376, 768)),
+            ("9:16", (768, 1344)),
+            ("9:16", (768, 1376)),
+            ("4:5", (896, 1152)),
+            ("5:4", (1152, 896)),
+        ]:
+            with self.subTest(ratio=ratio, size=size):
+                returned = encode(subject_picture(size))
+                generator, session = self.generator(
+                    provider("gemini-test", "gemini"), output=returned
+                )
+                images, error = await generator.generate_image(
+                    "保持完整", [(reference, "image/png")], aspect_ratio=ratio
+                )
+                self.assertIsNone(error)
+                self.assertEqual(images[0], returned)
+                payload = session.requests[0]["fields"]
+                self.assertEqual(
+                    payload["generationConfig"]["imageConfig"]["aspectRatio"], ratio
+                )
+                self.assertIn(ratio, payload["contents"][0]["parts"][0]["text"])
+
+    async def test_gemini_config_retry_keeps_the_returned_canvas(self):
+        returned = encode(subject_picture((1024, 1024)))
+        failure = Response(400, {"error": {"message": "Unknown generationConfig"}})
+        generator, session = self.generator(
+            provider("gemini-test", "gemini"),
+            responses=[failure, Response()], output=returned,
+        )
+        images, error = await generator.generate_image("风景", aspect_ratio="16:9")
+        self.assertIsNone(error)
+        self.assertEqual(images[0], returned)
+        self.assertEqual(len(session.requests), 2)
+        self.assertIn("generationConfig", session.requests[0]["fields"])
+        self.assertNotIn("generationConfig", session.requests[1]["fields"])
+        self.assertEqual(
+            session.requests[0]["fields"]["contents"],
+            session.requests[1]["fields"]["contents"],
+        )
+
+    async def test_gemini_upscale_preserves_native_ratio_and_transparency(self):
+        returned = encode(Image.new("RGBA", (672, 384), (200, 60, 30, 128)))
+        generator, session = self.generator(
+            provider("gemini-test", "gemini"), output=returned
+        )
+        images, error = await generator.generate_image(
+            "风景", aspect_ratio="16:9", image_size="2K"
+        )
+        self.assertIsNone(error)
+        self.assert_ratio(images[0], (672, 384))
+        with Image.open(BytesIO(images[0])) as output:
+            self.assertEqual(max(output.size), 2048)
+            self.assertEqual(output.mode, "RGBA")
+            self.assertEqual(output.getchannel("A").getextrema(), (128, 128))
+        self.assertEqual(
+            session.requests[0]["fields"]["generationConfig"]["imageConfig"],
+            {"aspectRatio": "16:9", "imageSize": "2K"},
+        )
+
+    async def test_gemini_output_exif_is_applied_without_padding(self):
+        source = subject_picture((1344, 768))
+        exif = source.getexif()
+        exif[274] = 6
+        returned = encode(source, exif=exif)
+        generator, _session = self.generator(
+            provider("gemini-test", "gemini"), output=returned
+        )
+        images, error = await generator.generate_image("人物", aspect_ratio="9:16")
+        self.assertIsNone(error)
+        with Image.open(BytesIO(returned)) as original:
+            expected = ImageOps.exif_transpose(original)
+            with Image.open(BytesIO(images[0])) as output:
+                self.assertEqual(output.size, (768, 1344))
+                self.assertEqual(output.tobytes(), expected.tobytes())
+                self.assertNotIn(output.getexif().get(274), (5, 6, 7, 8))
+
+    async def test_cross_provider_fallback_uses_successful_provider_ratio_policy(self):
+        returned = encode(subject_picture((1024, 1024)))
+        for primary_type, backup_type in [
+            ("openai", "gemini"),
+            ("openai", "vertex"),
+            ("gemini", "openai"),
+        ]:
+            with self.subTest(primary=primary_type, backup=backup_type):
+                primary = provider("primary", primary_type)
+                backup = provider("backup", backup_type)
+                generator = GENERATOR.AIImageGenerator(primary, backup_config=backup)
+                setattr(
+                    generator, f"_generate_{primary_type}",
+                    AsyncMock(return_value=(None, "API 500")),
+                )
+                handler = AsyncMock(return_value=([returned], None))
+                setattr(generator, f"_generate_{backup_type}", handler)
+                images, error = await generator.generate_image(
+                    "风景", aspect_ratio="16:9"
+                )
+                self.assertIsNone(error)
+                self.assertIs(generator.last_used_provider, backup)
+                self.assertEqual(handler.await_args.args[3], "16:9")
+                if backup_type == "openai":
+                    self.assert_ratio(images[0], (16, 9))
+                else:
+                    self.assertEqual(images[0], returned)
 
     async def test_exact_reference_ratio_can_use_a_native_supported_ratio(self):
         generator = GENERATOR.AIImageGenerator(provider("gemini-test", "gemini"))
